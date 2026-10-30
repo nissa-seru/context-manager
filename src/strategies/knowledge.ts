@@ -118,6 +118,8 @@ export class KnowledgeStrategy extends AutobiographicalStrategy {
     let currentChunk: StoredMessage[] = [];
     let currentTokens = 0;
     let currentPhase: PhaseType | null = null;
+    // Calls in the current chunk that no result in it has answered yet.
+    let unanswered = new Set<string>();
     let lastToolPhase: PhaseType = 'synthesis';
     let chunkFilteredStart = 0;
     const closeAt = (end: number): void => {
@@ -135,6 +137,7 @@ export class KnowledgeStrategy extends AutobiographicalStrategy {
       if (!chunk.compressed) this.compressionQueue.push(chunk.index);
 
       currentChunk = [];
+      unanswered = new Set();
       currentTokens = 0;
       chunkFilteredStart = end;
     };
@@ -152,12 +155,14 @@ export class KnowledgeStrategy extends AutobiographicalStrategy {
       // result with its call folded into the summary, and pairing repair
       // drops a result whose call isn't before it. So when a summary ends at
       // a call answered only later, the result joins the summary's chunk,
-      // which the overlap guard then refuses, as on main. A result for
-      // another call, as once messages between them are removed, is no
+      // which the overlap guard then refuses, as on main. The chunk stays
+      // open for a result to any call in it still unanswered, so two calls'
+      // results that come after both stay with them; a result for a call
+      // outside the chunk, as once messages between them are removed, is no
       // reason to stay open.
       const summaryChanges = previous !== undefined
         && coveredBy.get(previous.id) !== coveredBy.get(msg.id)
-        && !this.answers(previous, msg);
+        && !this.answersOneOf(unanswered, msg);
       if (previous && (changeBefore || summaryChanges)) {
         // The compressible stream skips a system change, which stays raw. A
         // chunk across it would summarize both sides as one, rendered at its
@@ -209,6 +214,10 @@ export class KnowledgeStrategy extends AutobiographicalStrategy {
       if (shouldClose) closeAt(i);
 
       currentChunk.push(msg);
+      for (const b of msg.content) {
+        if (b.type === 'tool_use') unanswered.add(b.id);
+        else if (b.type === 'tool_result') unanswered.delete(b.toolUseId);
+      }
       currentTokens += msgTokens;
       currentPhase = phase;
     }
@@ -409,10 +418,9 @@ export class KnowledgeStrategy extends AutobiographicalStrategy {
     return 'synthesis';
   }
 
-  /** True when `reply` holds a result for a call `call` makes. */
-  private answers(call: StoredMessage, reply: StoredMessage): boolean {
-    const ids = new Set(call.content.flatMap((b) => (b.type === 'tool_use' ? [b.id] : [])));
-    return reply.content.some((b) => b.type === 'tool_result' && ids.has(b.toolUseId));
+  /** True when `reply` holds a result for one of `calls`. */
+  private answersOneOf(calls: ReadonlySet<string>, reply: StoredMessage): boolean {
+    return reply.content.some((b) => b.type === 'tool_result' && calls.has(b.toolUseId));
   }
 
   /**
