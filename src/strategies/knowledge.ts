@@ -26,6 +26,12 @@ const DEFAULT_LESSON_NAMES = ['lessons:create', 'lessons:update'];
  *
  * Also adds [LEAD] tracking: unresolved questions/leads are flagged in summaries
  * and preserved across compression levels.
+ *
+ * It opens stores it wrote. Its chunks are cut again at every load, and an L1
+ * holds a chunk only when the chunk is exactly its sources that remain, so a
+ * store another strategy wrote, with L1s cut on other boundaries and merged,
+ * can be refused at open with a `StoreTopologyError` under the default
+ * `topologyPolicy`.
  */
 export class KnowledgeStrategy extends AutobiographicalStrategy {
   readonly name = 'knowledge' as const;
