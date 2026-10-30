@@ -18130,13 +18130,38 @@ export class AutobiographicalStrategy implements ResettableStrategy {
     return last.content.some((b) => b.type === 'tool_use');
   }
 
+  /**
+   * Each L1's id, keyed by its sources that `listing` still holds, for
+   * `createChunk`: an L1 stands for the chunk cut over exactly those
+   * messages, so a removed or hidden source doesn't take its chunk from it.
+   * Where two L1s share a key, the first in the summary list keeps it. An L1
+   * with no source left has no key.
+   */
+  protected l1ByPresentSources(listing: ReadonlyArray<{ id: MessageId }>): Map<string, string> {
+    const present = new Set(listing.map((m) => m.id));
+    const byKey = new Map<string, string>();
+    for (const s of this.summaries) {
+      if (s.level !== 1) continue;
+      const key = s.sourceIds.filter((id) => present.has(id)).join(':');
+      if (key && !byKey.has(key)) byKey.set(key, s.id);
+    }
+    return byKey;
+  }
+
+  /**
+   * A chunk over `messages`, compressed when an earlier rebuild's chunk over
+   * the same messages was, or, in hierarchical mode, when an L1 stands for
+   * them: the one `l1ByKey` (`l1ByPresentSources`) names, or without it, one
+   * whose sources are exactly these messages.
+   */
   protected createChunk(
     index: number,
     startIndex: number,
     endIndex: number,
     messages: StoredMessage[],
     tokens: number,
-    existingCompressed: Map<string, Chunk>
+    existingCompressed: Map<string, Chunk>,
+    l1ByKey?: ReadonlyMap<string, string>,
   ): Chunk {
     const chunk: Chunk = {
       index,
@@ -18154,14 +18179,13 @@ export class AutobiographicalStrategy implements ResettableStrategy {
       chunk.summaryId = existing.summaryId;
     }
 
-    // In hierarchical mode, also check if a summary exists for this chunk
     if (this.config.hierarchical && !chunk.compressed) {
-      const summary = this.summaries.find(
-        s => s.level === 1 && s.sourceIds.join(':') === key
-      );
-      if (summary) {
+      const summaryId = l1ByKey
+        ? l1ByKey.get(key)
+        : this.summaries.find((s) => s.level === 1 && s.sourceIds.join(':') === key)?.id;
+      if (summaryId) {
         chunk.compressed = true;
-        chunk.summaryId = summary.id;
+        chunk.summaryId = summaryId;
       }
     }
 

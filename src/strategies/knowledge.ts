@@ -73,6 +73,7 @@ export class KnowledgeStrategy extends AutobiographicalStrategy {
     const all = store.getAll();
     const position = this.positionIndex(all);
     const changes = systemChangePositions(all);
+    const l1ByKey = this.l1ByPresentSources(all);
     // The walk below is in store order, so one cursor finds the changes
     // stored between each message and the one before it.
     let nextChange = 0;
@@ -113,7 +114,8 @@ export class KnowledgeStrategy extends AutobiographicalStrategy {
         end,
         currentChunk,
         currentTokens,
-        existingCompressed
+        existingCompressed,
+        l1ByKey,
       );
       chunk.phaseType = currentPhase!;
       this.chunks.push(chunk);
@@ -200,7 +202,8 @@ export class KnowledgeStrategy extends AutobiographicalStrategy {
         messagesToChunk.length,
         currentChunk,
         currentTokens,
-        existingCompressed
+        existingCompressed,
+        l1ByKey,
       );
       chunk.phaseType = currentPhase;
       this.chunks.push(chunk);
