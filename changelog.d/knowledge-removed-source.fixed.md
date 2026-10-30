@@ -11,3 +11,10 @@
   listed or the last overlapping one did, and a store whose level-2 summary
   held the other refused to open the same way. A store already in one of
   these states opens again with no repair step.
+  Where a summary ends at tool calls answered only after it, and the next
+  summary already holds one of those results, both summaries now stay linked:
+  a later result for another of the calls goes out without its call, so its
+  output isn't sent. Before, the two summaries' messages were joined and sent
+  raw, which made such a store refuse to open once a level-2 summary held
+  them between two others; and that later result's output was left out of
+  the summary its own chunk was compressed into, then as now.
