@@ -347,17 +347,46 @@ describe('KnowledgeStrategy: a message removed from inside a summary\'s sources'
     await triple(m, 'A');
     say(m, 'User', 'X');
     call(m, 'ia');
-    call(m, 'ib');
+    const cb = call(m, 'ib');
     await drain(m);
+    assert.equal(l1Over(s, cb)?.sourceIds.at(-1), cb, 'setup: a summary ends at the two calls');
     result(m, 'ia');
     result(m, 'ib');
     await compileAll(m);
     await drain(m);
     const blocks = (await m.compile({ maxTokens: 100_000, reserveForResponse: 0 })).messages
-      .flatMap((x) => x.content as Array<{ type: string; id?: string; toolUseId?: string }>);
+      .flatMap((x) => x.content as Array<{ type: string; id?: string; toolUseId?: string; content?: unknown }>);
     assert.deepEqual(blocks.filter((b) => b.type === 'tool_use').map((b) => b.id), ['ia', 'ib']);
-    assert.deepEqual(blocks.filter((b) => b.type === 'tool_result').map((b) => b.toolUseId), ['ia', 'ib']);
+    const results = blocks.filter((b) => b.type === 'tool_result');
+    assert.deepEqual(results.map((b) => b.toolUseId), ['ia', 'ib']);
+    assert.ok(results.every((b) => JSON.stringify(b.content).includes(`found ${b.toolUseId}`)), 'each result goes out with its own output');
     m.close();
+  });
+
+  it('a result another summary already covers, answering a call the summary before it left unanswered, keeps the two summaries\' chunks apart', async () => {
+    const { membrane } = stub();
+    const s = seeded();
+    const m = await open(s, membrane);
+    const x = [0, 1, 2].map((k) => say(m, k % 2 === 0 ? 'User' : 'Claude', `X-${k}`));
+    const d = say(m, 'User', 'D');
+    const ca = call(m, 'qa');
+    const cb = call(m, 'qb');
+    const rb = result(m, 'qb');
+    const ra = result(m, 'qa');
+    const tail = [say(m, 'Claude', 'T-0'), say(m, 'User', 'T-1')];
+    const w = [0, 1, 2].map((k) => say(m, k % 2 === 0 ? 'Claude' : 'User', `W-${k}`));
+    s.l1('L1-x', x);
+    s.l1('L1-calls', [d, ca, cb, rb]);
+    s.l1('L1-late', [ra, ...tail]);
+    s.l1('L1-w', w);
+    s.l2('L2-z', ['L1-x', 'L1-calls', 'L1-late', 'L1-w'], x[0], w[2]);
+    m.close();
+    const again = knowledge();
+    const reopened = await open(again, membrane);
+    assert.deepEqual(again.getTopologyViolations(), []);
+    assert.equal(linkOf(again, d), 'L1-calls');
+    assert.equal(linkOf(again, ra), 'L1-late');
+    reopened.close();
   });
 
   it('a message a view filter hides from inside a merged summary\'s sources counts as gone: the store opens, its load audit finding nothing, and the rest don\'t go out raw', async () => {
