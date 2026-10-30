@@ -28,10 +28,10 @@ const DEFAULT_LESSON_NAMES = ['lessons:create', 'lessons:update'];
  * and preserved across compression levels.
  *
  * It opens stores it wrote. Its chunks are cut again at every load, and an L1
- * holds a chunk only when the chunk is exactly its sources that remain, so a
- * store another strategy wrote, with L1s cut on other boundaries and merged,
- * can be refused at open with a `StoreTopologyError` under the default
- * `topologyPolicy`.
+ * holds a chunk only when the chunk is exactly its sources the walk still
+ * compresses, so a store another strategy wrote, with L1s cut on other
+ * boundaries and merged, can be refused at open with a `StoreTopologyError`
+ * under the default `topologyPolicy`.
  */
 export class KnowledgeStrategy extends AutobiographicalStrategy {
   readonly name = 'knowledge' as const;
@@ -79,7 +79,7 @@ export class KnowledgeStrategy extends AutobiographicalStrategy {
     const all = store.getAll();
     const position = this.positionIndex(all);
     const changes = systemChangePositions(all);
-    const l1ByKey = this.l1ByPresentSources(all);
+    const l1ByKey = this.l1ByPresentSources(messagesToChunk);
     // The walk below is in store order, so one cursor finds the changes
     // stored between each message and the one before it.
     let nextChange = 0;
@@ -93,10 +93,13 @@ export class KnowledgeStrategy extends AutobiographicalStrategy {
     }
     // A chunk holds the messages of one summary, or of none, but for a call's
     // result: it closes where the summary covering the walk's messages
-    // changes, except between a call and its result (below). The walk otherwise
-    // decides boundaries afresh, so once a message that closed a chunk is
-    // removed (a consolidation removes its system changes), a chunk could run
-    // into or across a summary's span; the overlap guard refuses to compress
+    // changes, except between a call and its result (below), and makes no
+    // phase or size close inside one summary's messages, which are already
+    // compressed, so the chunk over them is the one its summary stands for
+    // however their phases read now. The walk otherwise decides boundaries
+    // afresh, so once a message that closed a chunk is removed (a
+    // consolidation removes its system changes), a chunk could run into or
+    // across a summary's span; the overlap guard refuses to compress
     // such a chunk for good, and its messages go out raw beside the summary
     // that already covers some of them. Where the chunks already match the
     // summaries, the walk closes there anyway. An L2's sources are summaries,
@@ -188,7 +191,11 @@ export class KnowledgeStrategy extends AutobiographicalStrategy {
       // iteration pulls the tool_result into the same chunk. (Phase never
       // changes between a tool_use and its tool_result — the result inherits
       // lastToolPhase — so this defers sizeExceeded closes in practice.)
+      const sameSummary = previous !== undefined
+        && coveredBy.get(msg.id) !== undefined
+        && coveredBy.get(msg.id) === coveredBy.get(previous.id);
       const shouldClose =
+        !sameSummary &&
         currentChunk.length >= 2 &&
         (phaseChanged || sizeExceeded) &&
         !this.lastMessageContainsToolUse(currentChunk);

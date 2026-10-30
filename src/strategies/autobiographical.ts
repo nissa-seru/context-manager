@@ -18131,21 +18131,25 @@ export class AutobiographicalStrategy implements ResettableStrategy {
   }
 
   /**
-   * Each L1's id, keyed by its sources that `listing` still holds, for
+   * Each L1's id, keyed by its sources that `stream` still holds, for
    * `createChunk`: an L1 stands for the chunk cut over exactly those
-   * messages, so a removed or hidden source doesn't take its chunk from it.
-   * Where two L1s share a key, the first in the summary list keeps it. An L1
-   * with no source left has no key.
+   * messages, so a source removed, hidden, pinned raw or inside a window
+   * doesn't take its chunk from it. Where two L1s share a key, one a summary
+   * has merged keeps it over one none has, and otherwise the first in the
+   * summary list does; of two merged ones, the other's parent is left without
+   * it. An L1 with no source left has no key.
    */
-  protected l1ByPresentSources(listing: ReadonlyArray<{ id: MessageId }>): Map<string, string> {
-    const present = new Set(listing.map((m) => m.id));
-    const byKey = new Map<string, string>();
+  protected l1ByPresentSources(stream: ReadonlyArray<{ id: MessageId }>): Map<string, string> {
+    const present = new Set(stream.map((m) => m.id));
+    const byKey = new Map<string, SummaryEntry>();
     for (const s of this.summaries) {
       if (s.level !== 1) continue;
       const key = s.sourceIds.filter((id) => present.has(id)).join(':');
-      if (key && !byKey.has(key)) byKey.set(key, s.id);
+      if (!key) continue;
+      const kept = byKey.get(key);
+      if (!kept || (!getSummaryParentId(kept) && getSummaryParentId(s))) byKey.set(key, s);
     }
-    return byKey;
+    return new Map([...byKey].map(([key, s]) => [key, s.id]));
   }
 
   /**
