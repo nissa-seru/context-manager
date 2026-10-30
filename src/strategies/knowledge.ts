@@ -155,11 +155,12 @@ export class KnowledgeStrategy extends AutobiographicalStrategy {
       // result with its call folded into the summary, and pairing repair
       // drops a result whose call isn't before it. So when a summary ends at
       // a call answered only later, the result joins the summary's chunk,
-      // which the overlap guard then refuses, as on main. The chunk stays
-      // open for a result to any call in it still unanswered, so two calls'
-      // results that come after both stay with them; a result for a call
-      // outside the chunk, as once messages between them are removed, is no
-      // reason to stay open.
+      // which the overlap guard then refuses, as on main. Where the summary
+      // changes, the chunk stays open for a result to any call in it still
+      // unanswered, so results that come right after two calls stay with
+      // them; a message that answers none of them closes it there, as does a
+      // result for a call outside the chunk, as once messages between them
+      // are removed.
       const summaryChanges = previous !== undefined
         && coveredBy.get(previous.id) !== coveredBy.get(msg.id)
         && !this.answersOneOf(unanswered, msg);
