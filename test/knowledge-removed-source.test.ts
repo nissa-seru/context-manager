@@ -46,11 +46,24 @@ function knowledge(): KnowledgeStrategy {
 
 /** A KnowledgeStrategy whose summaries a test writes itself. */
 class Seeded extends KnowledgeStrategy {
-  add(entry: object): void { this.pushSummary(entry as never); }
-  mergeInto(ids: string[], parent: string): void {
-    for (const id of ids) this.setMergedInto((this as unknown as Inside).summaries.find((x) => x.id === id) as never, parent);
+  l1(id: string, sourceIds: string[]): void {
+    this.pushSummary({
+      id, level: 1, sourceLevel: 0, sourceIds, sourceRange: { first: sourceIds[0], last: sourceIds[sourceIds.length - 1] },
+      content: `${id} recollection`, tokens: 10, created: 0,
+    } as never);
+  }
+  l2(id: string, sources: string[], first: string, last: string): void {
+    this.pushSummary({
+      id, level: 2, sourceLevel: 1, sourceIds: sources, sourceRange: { first, last },
+      content: `${id} recollection`, tokens: 10, created: 0,
+    } as never);
+    for (const source of sources) {
+      this.setMergedInto((this as unknown as Inside).summaries.find((x) => x.id === source) as never, id);
+    }
   }
 }
+
+const seeded = () => new Seeded(options as ConstructorParameters<typeof KnowledgeStrategy>[0]);
 
 async function open(strategy: KnowledgeStrategy, membrane: object, viewFilter?: (m: StoredMessage) => boolean) {
   return ContextManager.open({ path: STORE, strategy, membrane: membrane as never, ...(viewFilter ? { viewFilter } : {}) });
@@ -69,7 +82,8 @@ const say = (m: ContextManager, who: string, body: string) =>
 const call = (m: ContextManager, id: string) =>
   m.addMessage('Claude', [text('looking it up'), { type: 'tool_use', id, name: 'mcpl:search', input: { q: id } } as never]);
 const result = (m: ContextManager, id: string) =>
-  m.addMessage('User', [{ type: 'tool_result', tool_use_id: id, content: `found ${id} `.repeat(30) } as never]);
+  m.addMessage('User', [{ type: 'tool_result', toolUseId: id, content: `found ${id} `.repeat(30) } as never]);
+const TOOLS = [{ name: 'mcpl:search', description: 'search', inputSchema: { type: 'object' as const } }];
 
 async function triple(m: ContextManager, name: string): Promise<string[]> {
   const ids = [0, 1, 2].map((k) => say(m, k % 2 === 0 ? 'User' : 'Claude', `${name}-${k}`));
@@ -83,6 +97,10 @@ const l2Over = (s: KnowledgeStrategy, l1: string) => summaries(s).find((x) => x.
 const textOf = (content: unknown): string =>
   typeof content === 'string' ? content : (content as { type: string; text?: string }[]).find((b) => b.type === 'text')?.text ?? '';
 const sentRaw = (sent: string, marker: string) => sent.includes(`${marker} we weighed`);
+const linkOf = (s: KnowledgeStrategy, id: string) =>
+  (s as unknown as { chunks: { messages: { id: string }[]; summaryId?: string }[] }).chunks
+    .find((c) => c.messages.some((x) => x.id === id))?.summaryId;
+const compileAll = async (m: ContextManager) => JSON.stringify((await m.compile({ maxTokens: 100_000, reserveForResponse: 0 })).messages);
 
 describe('KnowledgeStrategy: a message removed from inside a summary\'s sources', () => {
   beforeEach(cleanup);
@@ -122,6 +140,7 @@ describe('KnowledgeStrategy: a message removed from inside a summary\'s sources'
       const { membrane } = stub();
       const s = knowledge();
       const m = await open(s, membrane);
+      m.setToolDefinitions(TOOLS);
       await triple(m, 'A');
       const d = say(m, 'User', 'D');
       const c1 = call(m, 't1');
@@ -134,7 +153,9 @@ describe('KnowledgeStrategy: a message removed from inside a summary\'s sources'
       assert.ok(l1 && l2Over(s, l1) && l1Over(s, c1)?.id === l1, 'one L1 over the dialogue, both calls and their results, merged');
       if (how === 'removed') m.removeMessage(c1);
       m.close();
-      (await reopenFindsNothing(membrane, how === 'removed' ? undefined : (msg) => msg.id !== c1)).close();
+      const reopened = await reopenFindsNothing(membrane, how === 'removed' ? undefined : (msg) => msg.id !== c1);
+      assert.ok(!sentRaw(await compileAll(reopened), 'D'), 'the dialogue the summary holds isn\'t sent raw');
+      reopened.close();
     });
   }
 
@@ -161,9 +182,10 @@ describe('KnowledgeStrategy: a message removed from inside a summary\'s sources'
     assert.ok(l1b, 'B has its L1');
     m.removeMessage(b[1]);
     const before = calls();
+    await compileAll(m);
     await drain(m);
     assert.equal(calls(), before, 'no call summarizes B\'s remaining messages again');
-    const sent = JSON.stringify((await m.compile({ maxTokens: 100_000, reserveForResponse: 0 })).messages);
+    const sent = await compileAll(m);
     assert.ok(sent.includes(textOf(l1b.content)), 'B\'s L1 goes out');
     assert.ok(!sentRaw(sent, 'B-0') && !sentRaw(sent, 'B-2'), 'B\'s remaining messages aren\'t sent raw');
     m.close();
@@ -207,28 +229,115 @@ describe('KnowledgeStrategy: a message removed from inside a summary\'s sources'
   for (const built of ['first', 'second'] as const) {
     it(`of two L1s over the same messages, the one an L2 is built on (the ${built} listed) keeps the ones left after a removal, so the store opens again`, async () => {
       const { membrane } = stub();
-      const s = new Seeded(options as ConstructorParameters<typeof KnowledgeStrategy>[0]);
+      const s = seeded();
       const m = await open(s, membrane);
       const ids = Array.from({ length: 9 }, (_, k) => say(m, k % 2 === 0 ? 'User' : 'Claude', `S-${k}`));
-      const l1 = (id: string, sourceIds: string[]) => s.add({
-        id, level: 1, sourceLevel: 0, sourceIds, sourceRange: { first: sourceIds[0], last: sourceIds[sourceIds.length - 1] },
-        content: `${id} recollection`, tokens: 10, created: 0,
-      });
-      l1('L1-a', ids.slice(0, 3));
-      l1('L1-first', ids.slice(3, 6));
-      l1('L1-second', ids.slice(3, 6));
-      l1('L1-c', ids.slice(6, 9));
-      const sources = ['L1-a', `L1-${built}`, 'L1-c'];
-      s.add({
-        id: 'L2-x', level: 2, sourceLevel: 1, sourceIds: sources,
-        sourceRange: { first: ids[0], last: ids[8] }, content: 'L2-x recollection', tokens: 10, created: 0,
-      });
-      s.mergeInto(sources, 'L2-x');
+      s.l1('L1-a', ids.slice(0, 3));
+      s.l1('L1-first', ids.slice(3, 6));
+      s.l1('L1-second', ids.slice(3, 6));
+      s.l1('L1-c', ids.slice(6, 9));
+      s.l2('L2-x', ['L1-a', `L1-${built}`, 'L1-c'], ids[0], ids[8]);
       m.removeMessage(ids[4]);
       m.close();
       (await reopenFindsNothing(membrane)).close();
     });
   }
+
+  for (const held of ['neither', 'both'] as const) {
+    it(`of two L1s over the same messages, ${held} held by an L2, the first listed keeps the ones left after a removal`, async () => {
+      const { membrane } = stub();
+      const s = seeded();
+      const m = await open(s, membrane);
+      const ids = Array.from({ length: 6 }, (_, k) => say(m, k % 2 === 0 ? 'User' : 'Claude', `S-${k}`));
+      s.l1('L1-a', ids.slice(0, 3));
+      s.l1('L1-first', ids.slice(3, 6));
+      s.l1('L1-second', ids.slice(3, 6));
+      if (held === 'both') {
+        s.l2('L2-x', ['L1-a', 'L1-first'], ids[0], ids[5]);
+        s.l2('L2-y', ['L1-second'], ids[3], ids[5]);
+      }
+      m.removeMessage(ids[4]);
+      m.close();
+      const again = knowledge();
+      const reopened = await open(again, membrane);
+      assert.equal(linkOf(again, ids[3]), 'L1-first');
+      reopened.close();
+    });
+  }
+
+  it('once an L2 takes the second of two L1s over the same messages, the next rebuild links the second', async () => {
+    const { membrane } = stub();
+    const s = seeded();
+    const m = await open(s, membrane);
+    const ids = Array.from({ length: 6 }, (_, k) => say(m, k % 2 === 0 ? 'User' : 'Claude', `S-${k}`));
+    s.l1('L1-a', ids.slice(0, 3));
+    s.l1('L1-first', ids.slice(3, 6));
+    s.l1('L1-second', ids.slice(3, 6));
+    await compileAll(m);
+    assert.equal(linkOf(s, ids[3]), 'L1-first', 'setup: the first links while neither is held');
+    s.l2('L2-x', ['L1-a', 'L1-second'], ids[0], ids[5]);
+    await compileAll(m);
+    assert.equal(linkOf(s, ids[3]), 'L1-second');
+    m.close();
+  });
+
+  for (const removal of [false, true]) {
+    it(`where a later unheld L1 overlaps L1s an L2 holds, the held ones keep their messages${removal ? ' after a removal' : ''}, so the store opens again`, async () => {
+      const { membrane } = stub();
+      const s = seeded();
+      const m = await open(s, membrane);
+      m.setToolDefinitions(TOOLS);
+      const x = [0, 1, 2].map((k) => say(m, k % 2 === 0 ? 'User' : 'Claude', `X-${k}`));
+      const mid = removal
+        ? [0, 1, 2, 3].map((k) => say(m, k % 2 === 0 ? 'User' : 'Claude', `M-${k}`))
+        : [call(m, 'o1'), result(m, 'o1'), say(m, 'Claude', 'M-2'), say(m, 'User', 'M-3')];
+      const y = [0, 1, 2].map((k) => say(m, k % 2 === 0 ? 'User' : 'Claude', `Y-${k}`));
+      s.l1('L1-x', x);
+      if (removal) {
+        s.l1('L1-m', mid);
+        s.l1('L1-y', y);
+        s.l2('L2-z', ['L1-x', 'L1-m', 'L1-y'], x[0], y[2]);
+        s.l1('L1-prefix', mid.slice(0, 3));
+        m.removeMessage(mid[2]);
+      } else {
+        s.l1('L1-call', mid.slice(0, 2));
+        s.l1('L1-talk', mid.slice(2, 4));
+        s.l1('L1-y', y);
+        s.l2('L2-z', ['L1-x', 'L1-call', 'L1-talk', 'L1-y'], x[0], y[2]);
+        s.l1('L1-both', mid);
+      }
+      m.close();
+      (await reopenFindsNothing(membrane)).close();
+    });
+  }
+
+  it('a result left beside another call once messages between them are removed doesn\'t hold their summaries\' chunks together', async () => {
+    const { membrane } = stub();
+    const s = knowledge();
+    const m = await open(s, membrane);
+    m.setToolDefinitions(TOOLS);
+    await triple(m, 'A');
+    const x = say(m, 'User', 'X');
+    call(m, 'pa');
+    const ra = result(m, 'pa');
+    await drain(m);
+    const cb = call(m, 'pb');
+    const rb = result(m, 'pb');
+    await drain(m);
+    await triple(m, 'C');
+    const l1x = l1Over(s, x)?.id;
+    const l1y = l1Over(s, cb)?.id;
+    assert.ok(l1x && l1y && l1x !== l1y && l1Over(s, ra)?.id === l1x && l1Over(s, rb)?.id === l1y, 'setup: one L1 ends at the first result, the next begins at the second call');
+    m.removeMessage(ra);
+    m.removeMessage(cb);
+    m.close();
+    const again = knowledge();
+    const reopened = await open(again, membrane);
+    assert.deepEqual(again.getTopologyViolations(), []);
+    assert.equal(linkOf(again, x), l1x);
+    assert.equal(linkOf(again, rb), l1y);
+    reopened.close();
+  });
 
   it('a message a view filter hides from inside a merged summary\'s sources counts as gone: the store opens, its load audit finding nothing, and the rest don\'t go out raw', async () => {
     const { membrane } = stub();
@@ -242,7 +351,7 @@ describe('KnowledgeStrategy: a message removed from inside a summary\'s sources'
 
     const hidden = b[1];
     const reopened = await reopenFindsNothing(membrane, (msg) => msg.id !== hidden);
-    const sent = JSON.stringify((await reopened.compile({ maxTokens: 100_000, reserveForResponse: 0 })).messages);
+    const sent = await compileAll(reopened);
     assert.ok(!sentRaw(sent, 'B-0') && !sentRaw(sent, 'B-2'), 'B\'s remaining messages aren\'t sent raw');
     reopened.close();
   });
