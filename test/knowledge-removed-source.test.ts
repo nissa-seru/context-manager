@@ -1,7 +1,8 @@
 /**
- * A message removed from inside a summary's sources, under KnowledgeStrategy:
- * the summary keeps its place over the messages that remain (#321), so a
- * merge over it and the store's next open both hold (context-manager D34).
+ * A message removed from inside a summary's sources, hidden by a view filter
+ * or pinned raw, under KnowledgeStrategy: the summary keeps its place over the
+ * messages that remain (#321), so a merge over it and the store's next open
+ * both hold.
  */
 
 import { describe, it, beforeEach, after } from 'node:test';
@@ -31,27 +32,47 @@ function stub() {
   return { membrane, calls: () => calls };
 }
 
+const options = {
+  compressionModel: 'test-compression-model',
+  headWindowTokens: 0,
+  recentWindowTokens: 0,
+  summaryTargetTokens: 20,
+  autoTickOnNewMessage: false,
+};
+
 function knowledge(): KnowledgeStrategy {
-  return new KnowledgeStrategy({
-    compressionModel: 'test-compression-model',
-    headWindowTokens: 0,
-    recentWindowTokens: 0,
-    mergeThreshold: 3,
-    summaryTargetTokens: 20,
-    autoTickOnNewMessage: false,
-  } as ConstructorParameters<typeof KnowledgeStrategy>[0]);
+  return new KnowledgeStrategy({ ...options, mergeThreshold: 3 } as ConstructorParameters<typeof KnowledgeStrategy>[0]);
+}
+
+/** A KnowledgeStrategy whose summaries a test writes itself. */
+class Seeded extends KnowledgeStrategy {
+  add(entry: object): void { this.pushSummary(entry as never); }
+  mergeInto(ids: string[], parent: string): void {
+    for (const id of ids) this.setMergedInto((this as unknown as Inside).summaries.find((x) => x.id === id) as never, parent);
+  }
 }
 
 async function open(strategy: KnowledgeStrategy, membrane: object, viewFilter?: (m: StoredMessage) => boolean) {
   return ContextManager.open({ path: STORE, strategy, membrane: membrane as never, ...(viewFilter ? { viewFilter } : {}) });
 }
 
-const drain = async (m: ContextManager) => { for (let i = 0; i < 30; i++) { await m.tick(); await settle(); } };
+async function reopenFindsNothing(membrane: object, viewFilter?: (m: StoredMessage) => boolean): Promise<ContextManager> {
+  const again = knowledge();
+  const reopened = await open(again, membrane, viewFilter);
+  assert.deepEqual(again.getTopologyViolations(), []);
+  return reopened;
+}
 
-/** Three messages, each with its own marker, then the drain: one chunk, one L1 over them. */
+const drain = async (m: ContextManager) => { for (let i = 0; i < 30; i++) { await m.tick(); await settle(); } };
+const say = (m: ContextManager, who: string, body: string) =>
+  m.addMessage(who, [text(`${body} we weighed the evidence and drew a conclusion about it `.repeat(4))]);
+const call = (m: ContextManager, id: string) =>
+  m.addMessage('Claude', [text('looking it up'), { type: 'tool_use', id, name: 'mcpl:search', input: { q: id } } as never]);
+const result = (m: ContextManager, id: string) =>
+  m.addMessage('User', [{ type: 'tool_result', tool_use_id: id, content: `found ${id} `.repeat(30) } as never]);
+
 async function triple(m: ContextManager, name: string): Promise<string[]> {
-  const ids = [0, 1, 2].map((k) =>
-    m.addMessage(k % 2 === 0 ? 'User' : 'Claude', [text(`${name}-${k} we weighed the evidence and drew a conclusion about it `.repeat(4))]));
+  const ids = [0, 1, 2].map((k) => say(m, k % 2 === 0 ? 'User' : 'Claude', `${name}-${k}`));
   await drain(m);
   return ids;
 }
@@ -59,6 +80,9 @@ async function triple(m: ContextManager, name: string): Promise<string[]> {
 const summaries = (s: KnowledgeStrategy) => (s as unknown as Inside).summaries;
 const l1Over = (s: KnowledgeStrategy, id: string) => summaries(s).find((x) => x.level === 1 && x.sourceIds.includes(id));
 const l2Over = (s: KnowledgeStrategy, l1: string) => summaries(s).find((x) => x.level === 2 && x.sourceIds.includes(l1));
+const textOf = (content: unknown): string =>
+  typeof content === 'string' ? content : (content as { type: string; text?: string }[]).find((b) => b.type === 'text')?.text ?? '';
+const sentRaw = (sent: string, marker: string) => sent.includes(`${marker} we weighed`);
 
 describe('KnowledgeStrategy: a message removed from inside a summary\'s sources', () => {
   beforeEach(cleanup);
@@ -76,11 +100,7 @@ describe('KnowledgeStrategy: a message removed from inside a summary\'s sources'
     await triple(m, 'C');
     assert.ok(l2Over(s, l1b), 'the merge takes the L1 the removed message was under');
     m.close();
-
-    const again = knowledge();
-    const reopened = await open(again, membrane);
-    assert.deepEqual(again.getTopologyViolations(), []);
-    reopened.close();
+    (await reopenFindsNothing(membrane)).close();
   });
 
   it('a removal under a summary already merged leaves a store that opens again, its load audit finding nothing', async () => {
@@ -94,26 +114,58 @@ describe('KnowledgeStrategy: a message removed from inside a summary\'s sources'
     assert.ok(l1b && l2Over(s, l1b), 'B\'s L1 is merged');
     m.removeMessage(b[1]);
     m.close();
-
-    const again = knowledge();
-    const reopened = await open(again, membrane);
-    assert.deepEqual(again.getTopologyViolations(), []);
-    reopened.close();
+    (await reopenFindsNothing(membrane)).close();
   });
 
-  it('after the removal, the summary still stands for the messages that remain: they go out inside it, not raw, and aren\'t summarized again', async () => {
+  for (const how of ['removed', 'hidden by a view filter'] as const) {
+    it(`a tool call ${how} from inside a merged summary, its result staying, leaves a store that opens again, its load audit finding nothing`, async () => {
+      const { membrane } = stub();
+      const s = knowledge();
+      const m = await open(s, membrane);
+      await triple(m, 'A');
+      const d = say(m, 'User', 'D');
+      const c1 = call(m, 't1');
+      result(m, 't1');
+      call(m, 't2');
+      result(m, 't2');
+      await drain(m);
+      await triple(m, 'C');
+      const l1 = l1Over(s, d)?.id;
+      assert.ok(l1 && l2Over(s, l1) && l1Over(s, c1)?.id === l1, 'one L1 over the dialogue, both calls and their results, merged');
+      if (how === 'removed') m.removeMessage(c1);
+      m.close();
+      (await reopenFindsNothing(membrane, how === 'removed' ? undefined : (msg) => msg.id !== c1)).close();
+    });
+  }
+
+  it('a source of a merged summary pinned raw leaves a store that opens again, its load audit finding nothing', async () => {
+    const { membrane } = stub();
+    const s = knowledge();
+    const m = await open(s, membrane);
+    await triple(m, 'A');
+    const b = await triple(m, 'B');
+    await triple(m, 'C');
+    assert.ok(l2Over(s, l1Over(s, b[1])!.id), 'B\'s L1 is merged');
+    m.pinRange(b[1], b[1]);
+    m.close();
+    (await reopenFindsNothing(membrane)).close();
+  });
+
+  it('after the removal, the summary still stands for the messages that remain: it goes out, they don\'t go out raw, and they aren\'t summarized again', async () => {
     const { membrane, calls } = stub();
     const s = knowledge();
     const m = await open(s, membrane);
     await triple(m, 'A');
     const b = await triple(m, 'B');
+    const l1b = l1Over(s, b[1]);
+    assert.ok(l1b, 'B has its L1');
     m.removeMessage(b[1]);
     const before = calls();
     await drain(m);
     assert.equal(calls(), before, 'no call summarizes B\'s remaining messages again');
-    const out = await m.compile({ maxTokens: 100_000, reserveForResponse: 0 });
-    const sent = JSON.stringify(out.messages);
-    assert.ok(!sent.includes('B-0 we weighed') && !sent.includes('B-2 we weighed'), 'B\'s remaining messages aren\'t sent raw');
+    const sent = JSON.stringify((await m.compile({ maxTokens: 100_000, reserveForResponse: 0 })).messages);
+    assert.ok(sent.includes(textOf(l1b.content)), 'B\'s L1 goes out');
+    assert.ok(!sentRaw(sent, 'B-0') && !sentRaw(sent, 'B-2'), 'B\'s remaining messages aren\'t sent raw');
     m.close();
   });
 
@@ -135,64 +187,50 @@ describe('KnowledgeStrategy: a message removed from inside a summary\'s sources'
     m.close();
   });
 
-  it('a summary whose sources are all removed is left out of merges, and the store opens again, its load audit finding nothing', async () => {
+  it('a summary whose sources are all removed is left out of the merge that follows, and the store opens again, its load audit finding nothing', async () => {
     const { membrane } = stub();
     const s = knowledge();
     const m = await open(s, membrane);
     await triple(m, 'A');
     const b = await triple(m, 'B');
+    const l1b = l1Over(s, b[1])?.id;
+    assert.ok(l1b, 'B has its L1');
     for (const id of b) m.removeMessage(id);
     await triple(m, 'C');
     await triple(m, 'D');
-    const l1b = l1Over(s, b[1])?.id;
-    assert.ok(l1b, 'B\'s L1 stands');
-    assert.equal(l2Over(s, l1b), undefined, 'no merge takes it');
+    assert.ok(summaries(s).some((x) => x.level === 2), 'a merge follows the removal');
+    assert.equal(l2Over(s, l1b), undefined, 'no merge takes B\'s L1');
     m.close();
-
-    const again = knowledge();
-    const reopened = await open(again, membrane);
-    assert.deepEqual(again.getTopologyViolations(), []);
-    reopened.close();
+    (await reopenFindsNothing(membrane)).close();
   });
 
-  it('of two L1s over the same messages, the first listed keeps the ones left after a removal, so an L2 over it opens again', async () => {
-    const { membrane } = stub();
-    class Seeded extends KnowledgeStrategy {
-      add(entry: object): void { this.pushSummary(entry as never); }
-      mergeInto(ids: string[], parent: string): void {
-        for (const id of ids) this.setMergedInto((this as unknown as Inside).summaries.find((x) => x.id === id) as never, parent);
-      }
-    }
-    const s = new Seeded({
-      compressionModel: 'test-compression-model', headWindowTokens: 0, recentWindowTokens: 0,
-      summaryTargetTokens: 20, autoTickOnNewMessage: false,
-    } as ConstructorParameters<typeof KnowledgeStrategy>[0]);
-    const m = await open(s, membrane);
-    const ids = Array.from({ length: 9 }, (_, k) =>
-      m.addMessage(k % 2 === 0 ? 'User' : 'Claude', [text(`S-${k} we weighed the evidence and drew a conclusion about it `.repeat(4))]));
-    const l1 = (id: string, sourceIds: string[]) => s.add({
-      id, level: 1, sourceLevel: 0, sourceIds, sourceRange: { first: sourceIds[0], last: sourceIds[sourceIds.length - 1] },
-      content: `${id} recollection`, tokens: 10, created: 0,
+  for (const built of ['first', 'second'] as const) {
+    it(`of two L1s over the same messages, the one an L2 is built on (the ${built} listed) keeps the ones left after a removal, so the store opens again`, async () => {
+      const { membrane } = stub();
+      const s = new Seeded(options as ConstructorParameters<typeof KnowledgeStrategy>[0]);
+      const m = await open(s, membrane);
+      const ids = Array.from({ length: 9 }, (_, k) => say(m, k % 2 === 0 ? 'User' : 'Claude', `S-${k}`));
+      const l1 = (id: string, sourceIds: string[]) => s.add({
+        id, level: 1, sourceLevel: 0, sourceIds, sourceRange: { first: sourceIds[0], last: sourceIds[sourceIds.length - 1] },
+        content: `${id} recollection`, tokens: 10, created: 0,
+      });
+      l1('L1-a', ids.slice(0, 3));
+      l1('L1-first', ids.slice(3, 6));
+      l1('L1-second', ids.slice(3, 6));
+      l1('L1-c', ids.slice(6, 9));
+      const sources = ['L1-a', `L1-${built}`, 'L1-c'];
+      s.add({
+        id: 'L2-x', level: 2, sourceLevel: 1, sourceIds: sources,
+        sourceRange: { first: ids[0], last: ids[8] }, content: 'L2-x recollection', tokens: 10, created: 0,
+      });
+      s.mergeInto(sources, 'L2-x');
+      m.removeMessage(ids[4]);
+      m.close();
+      (await reopenFindsNothing(membrane)).close();
     });
-    l1('L1-a', ids.slice(0, 3));
-    l1('L1-first', ids.slice(3, 6));
-    l1('L1-second', ids.slice(3, 6));
-    l1('L1-c', ids.slice(6, 9));
-    s.add({
-      id: 'L2-x', level: 2, sourceLevel: 1, sourceIds: ['L1-a', 'L1-first', 'L1-c'],
-      sourceRange: { first: ids[0], last: ids[8] }, content: 'L2-x recollection', tokens: 10, created: 0,
-    });
-    s.mergeInto(['L1-a', 'L1-first', 'L1-c'], 'L2-x');
-    m.removeMessage(ids[4]);
-    m.close();
+  }
 
-    const again = knowledge();
-    const reopened = await open(again, membrane);
-    assert.deepEqual(again.getTopologyViolations(), []);
-    reopened.close();
-  });
-
-  it('a message a view filter hides from inside a merged summary\'s sources counts as gone: the store opens, its load audit finding nothing', async () => {
+  it('a message a view filter hides from inside a merged summary\'s sources counts as gone: the store opens, its load audit finding nothing, and the rest don\'t go out raw', async () => {
     const { membrane } = stub();
     const s = knowledge();
     const m = await open(s, membrane);
@@ -203,9 +241,9 @@ describe('KnowledgeStrategy: a message removed from inside a summary\'s sources'
     m.close();
 
     const hidden = b[1];
-    const again = knowledge();
-    const reopened = await open(again, membrane, (msg) => msg.id !== hidden);
-    assert.deepEqual(again.getTopologyViolations(), []);
+    const reopened = await reopenFindsNothing(membrane, (msg) => msg.id !== hidden);
+    const sent = JSON.stringify((await reopened.compile({ maxTokens: 100_000, reserveForResponse: 0 })).messages);
+    assert.ok(!sentRaw(sent, 'B-0') && !sentRaw(sent, 'B-2'), 'B\'s remaining messages aren\'t sent raw');
     reopened.close();
   });
 });
