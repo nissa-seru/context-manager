@@ -6,7 +6,8 @@
   beside it, and once a level-2 summary held it between two others, whether
   merged before or after, the store's next open refused with
   `StoreTopologyError` ("summary owns non-contiguous leaves") under the default
-  `topologyPolicy: 'reject'`. Of two L1s over the same messages, the one a
-  level-2 summary holds now keeps them; before, the first listed did, and a
-  store whose level-2 summary held the second refused to open the same way.
-  A store already in any of these states opens again with no repair step.
+  `topologyPolicy: 'reject'`. Where two L1s cover the same messages, or
+  overlap, the one a level-2 summary holds now keeps them; before, the first
+  listed or the last overlapping one did, and a store whose level-2 summary
+  held the other refused to open the same way. A store already in one of
+  these states opens again with no repair step.

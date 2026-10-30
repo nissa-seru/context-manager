@@ -10,6 +10,7 @@ import type {
 import { AutobiographicalStrategy, type Chunk } from './autobiographical.js';
 import type { ConfigLayer } from '../config-provenance.js';
 import { systemChangePositions } from '../system-changes.js';
+import { getSummaryParentId } from '../types/strategy.js';
 
 const DEFAULT_RESEARCH_PREFIXES = ['mcpl:', 'zulip:'];
 const DEFAULT_SUBAGENT_PREFIXES = ['subagent:'];
@@ -26,12 +27,6 @@ const DEFAULT_LESSON_NAMES = ['lessons:create', 'lessons:update'];
  *
  * Also adds [LEAD] tracking: unresolved questions/leads are flagged in summaries
  * and preserved across compression levels.
- *
- * It opens stores it wrote. Its chunks are cut again at every load, and an L1
- * holds a chunk only when the chunk is exactly its sources the walk still
- * compresses, so a store another strategy wrote, with L1s cut on other
- * boundaries and merged, can be refused at open with a `StoreTopologyError`
- * under the default `topologyPolicy`.
  */
 export class KnowledgeStrategy extends AutobiographicalStrategy {
   readonly name = 'knowledge' as const;
@@ -103,10 +98,19 @@ export class KnowledgeStrategy extends AutobiographicalStrategy {
     // such a chunk for good, and its messages go out raw beside the summary
     // that already covers some of them. Where the chunks already match the
     // summaries, the walk closes there anyway. An L2's sources are summaries,
-    // not messages.
+    // not messages. Where L1s overlap, a message goes to the first that a
+    // summary has merged, ahead of any none has, so the walk cuts along the
+    // tree; among unmerged ones the last listed takes it.
     const coveredBy = new Map<string, string>();
+    const heldUnder = new Set<string>();
     for (const s of this.summaries) {
-      if (s.level === 1) for (const id of s.sourceIds) coveredBy.set(id, s.id);
+      if (s.level !== 1) continue;
+      const held = getSummaryParentId(s) !== undefined;
+      for (const id of s.sourceIds) {
+        if (heldUnder.has(id)) continue;
+        coveredBy.set(id, s.id);
+        if (held) heldUnder.add(id);
+      }
     }
 
     this.resetChunks();
@@ -148,10 +152,12 @@ export class KnowledgeStrategy extends AutobiographicalStrategy {
       // result with its call folded into the summary, and pairing repair
       // drops a result whose call isn't before it. So when a summary ends at
       // a call answered only later, the result joins the summary's chunk,
-      // which the overlap guard then refuses, as on main.
+      // which the overlap guard then refuses, as on main. A result for
+      // another call, as once messages between them are removed, is no
+      // reason to stay open.
       const summaryChanges = previous !== undefined
         && coveredBy.get(previous.id) !== coveredBy.get(msg.id)
-        && !(this.hasToolUse(previous) && this.hasToolResult(msg));
+        && !this.answers(previous, msg);
       if (previous && (changeBefore || summaryChanges)) {
         // The compressible stream skips a system change, which stays raw. A
         // chunk across it would summarize both sides as one, rendered at its
@@ -401,6 +407,12 @@ export class KnowledgeStrategy extends AutobiographicalStrategy {
     if (toolNames.some(n => researchPrefixes.some(p => n.startsWith(p)))) return 'research';
 
     return 'synthesis';
+  }
+
+  /** True when `reply` holds a result for a call `call` makes. */
+  private answers(call: StoredMessage, reply: StoredMessage): boolean {
+    const ids = new Set(call.content.flatMap((b) => (b.type === 'tool_use' ? [b.id] : [])));
+    return reply.content.some((b) => b.type === 'tool_result' && ids.has(b.toolUseId));
   }
 
   /**

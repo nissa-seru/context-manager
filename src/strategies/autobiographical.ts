@@ -18153,10 +18153,12 @@ export class AutobiographicalStrategy implements ResettableStrategy {
   }
 
   /**
-   * A chunk over `messages`, compressed when an earlier rebuild's chunk over
-   * the same messages was, or, in hierarchical mode, when an L1 stands for
-   * them: the one `l1ByKey` (`l1ByPresentSources`) names, or without it, one
-   * whose sources are exactly these messages.
+   * A chunk over `messages`, compressed when an L1 stands for them or an
+   * earlier rebuild's chunk over the same messages was. With `l1ByKey`
+   * (`l1ByPresentSources`), in hierarchical mode, the L1 it names comes
+   * first, so a rebuild follows a change in which L1 it prefers; without it,
+   * the earlier chunk comes first, then an L1 whose sources are exactly these
+   * messages.
    */
   protected createChunk(
     index: number,
@@ -18177,16 +18179,16 @@ export class AutobiographicalStrategy implements ResettableStrategy {
     };
 
     const key = this.chunkKey(chunk);
+    const mapped = this.config.hierarchical ? l1ByKey?.get(key) : undefined;
     const existing = existingCompressed.get(key);
-    if (existing) {
+    if (mapped) {
+      chunk.compressed = true;
+      chunk.summaryId = mapped;
+    } else if (existing) {
       chunk.compressed = true;
       chunk.summaryId = existing.summaryId;
-    }
-
-    if (this.config.hierarchical && !chunk.compressed) {
-      const summaryId = l1ByKey
-        ? l1ByKey.get(key)
-        : this.summaries.find((s) => s.level === 1 && s.sourceIds.join(':') === key)?.id;
+    } else if (this.config.hierarchical && !l1ByKey) {
+      const summaryId = this.summaries.find((s) => s.level === 1 && s.sourceIds.join(':') === key)?.id;
       if (summaryId) {
         chunk.compressed = true;
         chunk.summaryId = summaryId;
