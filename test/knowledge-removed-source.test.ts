@@ -346,10 +346,11 @@ describe('KnowledgeStrategy: a message removed from inside a summary\'s sources'
     m.setToolDefinitions(TOOLS);
     await triple(m, 'A');
     say(m, 'User', 'X');
-    call(m, 'ia');
+    const ca = call(m, 'ia');
     const cb = call(m, 'ib');
     await drain(m);
-    assert.equal(l1Over(s, cb)?.sourceIds.at(-1), cb, 'setup: a summary ends at the two calls');
+    const over = l1Over(s, cb);
+    assert.ok(over && over.sourceIds.at(-1) === cb && over.sourceIds.at(-2) === ca, 'setup: one summary ends at the two calls');
     result(m, 'ia');
     result(m, 'ib');
     await compileAll(m);
