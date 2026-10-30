@@ -137,28 +137,41 @@ describe('KnowledgeStrategy: a message removed from inside a summary\'s sources'
     reopened.close();
   });
 
-  it('of two summaries over the same messages, one of them removed, the one listed first stands for the rest', async () => {
+  it('of two L1s over the same messages, the first listed keeps the ones left after a removal, so an L2 over it opens again', async () => {
     const { membrane } = stub();
-    class Twice extends KnowledgeStrategy {
-      add(entry: { id: string; level: number; sourceLevel: number; sourceIds: string[]; sourceRange: { first: string; last: string }; content: string; tokens: number; created: number }): void {
-        this.pushSummary(entry as never);
+    class Seeded extends KnowledgeStrategy {
+      add(entry: object): void { this.pushSummary(entry as never); }
+      mergeInto(ids: string[], parent: string): void {
+        for (const id of ids) this.setMergedInto((this as unknown as Inside).summaries.find((x) => x.id === id) as never, parent);
       }
     }
-    const s = new Twice({
+    const s = new Seeded({
       compressionModel: 'test-compression-model', headWindowTokens: 0, recentWindowTokens: 0,
       summaryTargetTokens: 20, autoTickOnNewMessage: false,
     } as ConstructorParameters<typeof KnowledgeStrategy>[0]);
     const m = await open(s, membrane);
-    const ids = [0, 1, 2].map((k) => m.addMessage(k % 2 === 0 ? 'User' : 'Claude', [text(`T-${k} we weighed the evidence and drew a conclusion about it `.repeat(4))]));
-    for (const name of ['FIRST', 'SECOND']) {
-      s.add({ id: `L1-${name.toLowerCase()}`, level: 1, sourceLevel: 0, sourceIds: ids, sourceRange: { first: ids[0], last: ids[2] }, content: `${name}-RECOLLECTION`, tokens: 10, created: 0 });
-    }
-    m.removeMessage(ids[1]);
-    const out = JSON.stringify((await m.compile({ maxTokens: 100_000, reserveForResponse: 0 })).messages);
-    assert.ok(out.includes('FIRST-RECOLLECTION'), 'the first summary goes out');
-    assert.ok(!out.includes('SECOND-RECOLLECTION'), 'the second doesn\'t');
-    assert.ok(!out.includes('T-0 we weighed') && !out.includes('T-2 we weighed'), 'the messages it stands for aren\'t sent raw');
+    const ids = Array.from({ length: 9 }, (_, k) =>
+      m.addMessage(k % 2 === 0 ? 'User' : 'Claude', [text(`S-${k} we weighed the evidence and drew a conclusion about it `.repeat(4))]));
+    const l1 = (id: string, sourceIds: string[]) => s.add({
+      id, level: 1, sourceLevel: 0, sourceIds, sourceRange: { first: sourceIds[0], last: sourceIds[sourceIds.length - 1] },
+      content: `${id} recollection`, tokens: 10, created: 0,
+    });
+    l1('L1-a', ids.slice(0, 3));
+    l1('L1-first', ids.slice(3, 6));
+    l1('L1-second', ids.slice(3, 6));
+    l1('L1-c', ids.slice(6, 9));
+    s.add({
+      id: 'L2-x', level: 2, sourceLevel: 1, sourceIds: ['L1-a', 'L1-first', 'L1-c'],
+      sourceRange: { first: ids[0], last: ids[8] }, content: 'L2-x recollection', tokens: 10, created: 0,
+    });
+    s.mergeInto(['L1-a', 'L1-first', 'L1-c'], 'L2-x');
+    m.removeMessage(ids[4]);
     m.close();
+
+    const again = knowledge();
+    const reopened = await open(again, membrane);
+    assert.deepEqual(again.getTopologyViolations(), []);
+    reopened.close();
   });
 
   it('a message a view filter hides from inside a merged summary\'s sources counts as gone: the store opens, its load audit finding nothing', async () => {
