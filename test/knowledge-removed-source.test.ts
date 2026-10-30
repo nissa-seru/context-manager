@@ -339,6 +339,27 @@ describe('KnowledgeStrategy: a message removed from inside a summary\'s sources'
     reopened.close();
   });
 
+  it('two calls a summary ends at, both answered after it, go out with their results', async () => {
+    const { membrane } = stub();
+    const s = new KnowledgeStrategy({ ...options, mergeThreshold: 99 } as ConstructorParameters<typeof KnowledgeStrategy>[0]);
+    const m = await open(s, membrane);
+    m.setToolDefinitions(TOOLS);
+    await triple(m, 'A');
+    say(m, 'User', 'X');
+    call(m, 'ia');
+    call(m, 'ib');
+    await drain(m);
+    result(m, 'ia');
+    result(m, 'ib');
+    await compileAll(m);
+    await drain(m);
+    const blocks = (await m.compile({ maxTokens: 100_000, reserveForResponse: 0 })).messages
+      .flatMap((x) => x.content as Array<{ type: string; id?: string; toolUseId?: string }>);
+    assert.deepEqual(blocks.filter((b) => b.type === 'tool_use').map((b) => b.id), ['ia', 'ib']);
+    assert.deepEqual(blocks.filter((b) => b.type === 'tool_result').map((b) => b.toolUseId), ['ia', 'ib']);
+    m.close();
+  });
+
   it('a message a view filter hides from inside a merged summary\'s sources counts as gone: the store opens, its load audit finding nothing, and the rest don\'t go out raw', async () => {
     const { membrane } = stub();
     const s = knowledge();
