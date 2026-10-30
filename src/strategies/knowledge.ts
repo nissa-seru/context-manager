@@ -156,14 +156,15 @@ export class KnowledgeStrategy extends AutobiographicalStrategy {
       // drops a result whose call isn't before it. So when a summary ends at
       // a call answered only later, the result joins the summary's chunk,
       // which the overlap guard then refuses, as on main. Where the summary
-      // changes, the chunk stays open for a result to any call in it still
-      // unanswered, so results that come right after two calls stay with
-      // them; a message that answers none of them closes it there, as does a
-      // result for a call outside the chunk, as once messages between them
-      // are removed.
+      // changes, the chunk stays open for a result no summary covers yet to
+      // a call in it still unanswered, so results that come right after two
+      // calls stay with them. It closes there for any other message: one
+      // holding results only for calls outside the chunk, as once messages
+      // between them are removed, or one another summary already covers,
+      // whose chunk would otherwise join this one and leave both unlinked.
       const summaryChanges = previous !== undefined
         && coveredBy.get(previous.id) !== coveredBy.get(msg.id)
-        && !this.answersOneOf(unanswered, msg);
+        && !(coveredBy.get(msg.id) === undefined && this.answersOneOf(unanswered, msg));
       if (previous && (changeBefore || summaryChanges)) {
         // The compressible stream skips a system change, which stays raw. A
         // chunk across it would summarize both sides as one, rendered at its
