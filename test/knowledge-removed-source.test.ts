@@ -117,6 +117,24 @@ describe('KnowledgeStrategy: a message removed from inside a summary\'s sources'
     m.close();
   });
 
+  it('after the removal and a merge, a switch to an earlier branch and back re-initializes, and the branch takes messages again', async () => {
+    const { membrane } = stub();
+    const s = knowledge();
+    const m = await open(s, membrane);
+    const a = await triple(m, 'A');
+    const b = await triple(m, 'B');
+    m.removeMessage(b[1]);
+    await triple(m, 'C');
+    assert.ok(l2Over(s, l1Over(s, b[0])!.id), 'the merge takes the L1 the removed message was under');
+    const from = m.currentBranch().name;
+    const back = m.branchAt(a[2], 'before-b');
+    await m.switchBranch(back);
+    await m.switchBranch(from);
+    assert.deepEqual(s.getTopologyViolations(), []);
+    assert.ok(m.addMessage('User', [text('after the switch')]), 'the branch takes a message');
+    m.close();
+  });
+
   it('a summary whose sources are all removed is left out of merges, and the store opens again, its load audit finding nothing', async () => {
     const { membrane } = stub();
     const s = knowledge();
