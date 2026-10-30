@@ -1025,14 +1025,27 @@ describe('the passthrough strategies and a system change before their window', (
     });
   }
 
-  it('passthrough: without changes, a newest message over the budget still sends nothing, as on main', async () => {
+  it('passthrough: without changes, a newest message over the budget is refused, naming the newest message alone and a newer one, which clears it, as the windowed strategy refuses it', async () => {
     const cm = await open(new PassthroughStrategy());
     cm.addMessage('User', [text('hello')]);
     const big = cm.addMessage('User', [text('big ' + 'word '.repeat(400))]);
-    const compiled = await cm.compile({ maxTokens: estimateOf(cm, big) - 1, reserveForResponse: 0 });
-    assert.equal(compiled.messages.length, 0);
-    // Nor does a response reserve larger than the budget make it refuse.
-    assert.equal((await cm.compile({ maxTokens: 10, reserveForResponse: 20 })).messages.length, 0);
+    const B = estimateOf(cm, big);
+    await assert.rejects(cm.compile({ maxTokens: B - 1, reserveForResponse: 0 }), (err: unknown) => {
+      assert.ok(err instanceof OverBudgetError, String(err));
+      assert.match(err.message, /^Passthrough: the newest message alone/);
+      assert.deepEqual(err.clearedBy, ['newer-message']);
+      assert.deepEqual([err.budget, err.actual], [B - 1, B]);
+      return true;
+    });
+    await cm.compile({ maxTokens: B - 1, reserveForResponse: 0 }, [], { dryRun: true });
+    // A response reserve larger than the budget leaves room for no message, which no newer one clears.
+    await assert.rejects(cm.compile({ maxTokens: 10, reserveForResponse: 20 }), (err: unknown) => {
+      assert.ok(err instanceof OverBudgetError, String(err));
+      assert.deepEqual(err.clearedBy, []);
+      return true;
+    });
+    const small = cm.addMessage('User', [text('ok')]);
+    assert.deepEqual(rawIds(await cm.compile({ maxTokens: B - 1, reserveForResponse: 0 })), [small]);
     // The windowed strategy refuses it, naming the newest message alone.
     const windowed = await open(new WindowedPassthroughStrategy());
     windowed.addMessage('User', [text('hello')]);

@@ -32,6 +32,7 @@ import {
   type ResolvedImageLimits,
 } from '../live-image-limits.js';
 import { holdsSystemChange, systemChangePositions } from '../system-changes.js';
+import { newestConversationMessage, newestTurnStage, windowStart } from './window-edges.js';
 
 /**
  * Options for {@link WindowedPassthroughStrategy}.
@@ -43,7 +44,10 @@ export interface WindowedPassthroughOptions {
    * 0.5), or, when the store holds system changes, which go out wherever the
    * window starts, this fraction of the room they leave. Between jumps the
    * anchor never moves, so compiled output between re-anchors is a
-   * byte-stable prefix plus pure appends — and the strategy
+   * byte-stable prefix plus pure appends, but for the images the live-image
+   * policy strips (below) and the newest conversation turn the window sends
+   * from before the anchor while nothing after it can open the window (see
+   * `renderedForms`), which leaves once something can — and the strategy
    * marks that prefix for the provider's prompt cache (see
    * {@link WindowedPassthroughStrategy} on cache markers), so the accepted
    * cost is one cache miss per jump, amortized over ~(1 - fraction) × that
@@ -127,8 +131,9 @@ const DEFAULT_MAX_LIVE_IMAGE_BYTES = 20 * 1024 * 1024;
  * Built for side-process agents (issue #77's subconscious) whose view is a
  * merged multi-slot timeline and whose durable output is what they deliver
  * elsewhere: no memory pyramid, no compression, no coverage machinery —
- * just "everything since the anchor," with the anchor moved only in coarse
- * jumps (see {@link WindowedPassthroughOptions.reAnchorFraction}) and moved
+ * just "everything since the anchor" (at its edges as `renderedForms`
+ * says), with the anchor moved only in coarse jumps (see
+ * {@link WindowedPassthroughOptions.reAnchorFraction}) and moved
  * outward only explicitly ({@link setAnchor}, e.g. to the start of the
  * oldest active tune-out).
  *
@@ -139,7 +144,7 @@ const DEFAULT_MAX_LIVE_IMAGE_BYTES = 20 * 1024 * 1024;
  * host-side switches that bypass `ContextManager.switchBranch` (undo/redo
  * switch the chronicle directly) — and a persisted value that cannot name
  * a position on the current branch (past its head) resets to 0 rather than
- * yielding an empty window.
+ * leaving the window only the newest conversation turn.
  *
  * **Cache markers.** The strategy holds first claim on message-level cache
  * breakpoints under the same slot contract as the autobiographical
@@ -155,9 +160,10 @@ const DEFAULT_MAX_LIVE_IMAGE_BYTES = 20 * 1024 * 1024;
  *
  * **Hard budget.** After per-message shaping (truncation, image policy) the
  * window is priced against `maxTokens - reserveForResponse`. Overflow
- * re-anchors; if the single newest message alone still exceeds the usable
- * budget, or with system changes, the changes and the newest conversation
- * message, or the changes alone, the strategy refuses with
+ * re-anchors; if the window it settles on, at least the single newest
+ * message (back to the calls its tool results answer, when it can't open the
+ * window itself), still exceeds the usable budget, or with system changes,
+ * the changes and that, or the changes alone, the strategy refuses with
  * {@link OverBudgetError} (the framework's over-budget breaker handles it)
  * rather than emitting a request the provider will reject. Previews report
  * the oversized window instead.
@@ -165,7 +171,15 @@ const DEFAULT_MAX_LIVE_IMAGE_BYTES = 20 * 1024 * 1024;
 export class WindowedPassthroughStrategy implements ContextStrategy {
   readonly name = 'windowed-passthrough';
   readonly maxMessageTokens?: number;
-  /** Renders the window raw; history before the anchor is not rendered, but for its system changes. */
+  /**
+   * Renders the window raw: from the anchor on, past each leading message
+   * holding a tool result whose call is before the window's start, or, when
+   * that leaves no conversation message, from the newest one, back to the
+   * calls its tool results answer. Any other tool result whose call isn't in
+   * the window, later in it or one whose call the view doesn't hold, goes out
+   * like any other message. History before the window is not rendered, but
+   * for its system changes.
+   */
   readonly renderedForms = ['raw', 'omitted'] as const;
 
   private readonly reAnchorFraction: number;
@@ -262,14 +276,15 @@ export class WindowedPassthroughStrategy implements ContextStrategy {
     // No-op: the window is recomputed on select().
   }
 
-  /** The current window start (inclusive), as a chronicle sequence. */
+  /** The current anchor, as a chronicle sequence: the window starts there, at its edges as `renderedForms` says. */
   getAnchor(): Sequence {
     this.syncToBranch();
     return this.anchor;
   }
 
   /**
-   * Move the window start explicitly and persist it. Movement is
+   * Move the anchor, where the window starts (see `renderedForms`), explicitly
+   * and persist it. Movement is
    * unrestricted — callers own the policy (e.g. "start of the oldest
    * active tune-out"). Moving the anchor earlier deliberately accepts one
    * full prefix invalidation.
@@ -301,8 +316,8 @@ export class WindowedPassthroughStrategy implements ContextStrategy {
     const head = this.store.currentSequence();
     if (value > head) {
       // Cannot name a position on this branch. A stale value here would make
-      // every select() return an empty window — and the next re-anchor would
-      // persist the stale-derived value into this branch.
+      // every select() send only the newest conversation turn — and the next
+      // re-anchor would persist the stale-derived value into this branch.
       this.diag.warn(
         `[windowed-passthrough] persisted anchor ${value} is past the branch head ${head} ` +
         `(${this.store.currentBranch().name}); resetting to 0`,
@@ -345,11 +360,8 @@ export class WindowedPassthroughStrategy implements ContextStrategy {
     const maxTokens = budget.maxTokens - budget.reserveForResponse;
     const messages = store.getAll();
 
-    // The window: everything at or after the anchor.
-    let start = 0;
-    while (start < messages.length && messages[start].sequence < this.anchor) {
-      start++;
-    }
+    // The window: everything from its start on, which the anchor sets.
+    let start = this.anchoredStart(messages);
 
     // Per-message shaping BEFORE pricing, so the window is sized on what
     // will actually be sent: the live-image policy's verdicts, decided once
@@ -421,11 +433,11 @@ export class WindowedPassthroughStrategy implements ContextStrategy {
         newStart = messages.length - 1;
         while (newStart > start && holdsSystemChange(messages[newStart]!.content)) newStart--;
       }
-      start = newStart;
+      start = windowStart(messages, newStart);
       total = 0;
       for (const i of keptBefore(start)) total += priced(i);
       for (let i = start; i < messages.length; i++) total += priced(i);
-      if (start < messages.length && messages[start].sequence !== this.anchor) {
+      if (start < messages.length && messages[start].sequence > this.anchor) {
         movedAnchor = messages[start].sequence;
       }
     }
@@ -442,11 +454,9 @@ export class WindowedPassthroughStrategy implements ContextStrategy {
       throw new OverBudgetError({
         budget: maxTokens,
         actual: total,
-        stage: changeTokens === 0
-          ? 'Windowed passthrough: the newest message alone'
-          : total > changeTokens
-            ? 'Windowed passthrough: its system changes and the newest conversation message'
-            : 'Windowed passthrough: its system changes alone',
+        stage: changeTokens === 0 || total > changeTokens
+          ? newestTurnStage('Windowed passthrough', changeTokens > 0, start < newestConversationMessage(messages))
+          : 'Windowed passthrough: its system changes alone',
         // No compression here: the window moves past this message once a
         // newer one that fits arrives (the progress clause above). System
         // changes go out wherever the window starts, so once they leave no
@@ -502,12 +512,13 @@ export class WindowedPassthroughStrategy implements ContextStrategy {
    * message to its newest: each cut as select cuts it (cappedContent), then
    * the live-image policy's verdicts applied (liveImagePolicy, stripImages),
    * each decided from its message and newer ones, with depth from the view's
-   * newest message, so they're select's. A message before the anchor comes
-   * back as null, since select leaves it out, but for a system change, which
-   * comes back as select sends it ahead of the window, cut as any message
-   * is: a compile moves the anchor only to a message it sent, but a
-   * caller's setAnchor can move it past one just stored. Like select, it
-   * first reloads the branch the store has moved to. A re-anchor the next
+   * newest message, so they're select's. A message before the window's start
+   * (see `renderedForms`) comes back as null, since select leaves it out, but
+   * for a system change, which comes back as select sends it ahead of the
+   * window, cut as any message is: a compile moves the anchor only to a
+   * message it sent, but a caller's setAnchor can move it past one just
+   * stored. Like select, it first reloads the branch the store has moved to.
+   * A re-anchor the next
    * compile's budget forces isn't foreseen: it moves the anchor only past a
    * window bigger than the budget allows. A body sharded under the
    * autobiographical strategy comes back shard by shard, since select sends
@@ -517,7 +528,8 @@ export class WindowedPassthroughStrategy implements ContextStrategy {
     this.syncToBranch();
     const messages = store.getAll();
     const at = new Map(messages.map((m, i) => [m.id, i] as const));
-    const shown = (i: number): boolean => messages[i]!.sequence >= this.anchor;
+    const start = this.anchoredStart(messages);
+    const shown = (i: number): boolean => i >= start;
     let from = messages.length;
     for (const id of ids) {
       const i = at.get(id);
@@ -546,7 +558,17 @@ export class WindowedPassthroughStrategy implements ContextStrategy {
     });
   }
 
-  /** 'window' when the last committed select moved the window's start. */
+  private anchorIndex(messages: StoredMessage[]): number {
+    let i = 0;
+    while (i < messages.length && messages[i].sequence < this.anchor) i++;
+    return i;
+  }
+
+  private anchoredStart(messages: StoredMessage[]): number {
+    return windowStart(messages, this.anchorIndex(messages));
+  }
+
+  /** 'window' when the last committed select moved the anchor. */
   takeSelectionCause(): string | undefined {
     const cause = this.pendingCause;
     this.pendingCause = undefined;
@@ -571,7 +593,7 @@ export class WindowedPassthroughStrategy implements ContextStrategy {
    *
    * That holds wherever the window starts, and the re-anchor walk reads them
    * as they are, as `renderAsNewest` does from the batch's oldest message:
-   * the window is every message from the anchor on, and each
+   * the window is every message from its start on, and each
    * verdict is decided from that message and newer ones only, its depth from
    * the newest message over the whole view and its count and bytes
    * newest-first. So a message's verdicts, and its price after them, are the

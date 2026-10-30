@@ -195,7 +195,7 @@ export interface ContextStrategy {
    *
    * `store` is the view a compile reads. An id comes back as null only when
    * the next compile doesn't send that message: the view leaves it out, such
-   * as by its filter, or windowed passthrough's anchor is past it. What the
+   * as by its filter, or windowed passthrough's window starts after it. What the
    * next compile decides from its budget or its plan isn't foreseen, since a
    * render has neither: windowed passthrough's re-anchor, or its refusal of a
    * newest message bigger than the budget; the memory strategy's refusal of

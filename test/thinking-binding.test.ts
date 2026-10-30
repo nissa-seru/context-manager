@@ -752,11 +752,20 @@ describe('thinking binding: compile', () => {
 
   it('a shorter or empty record doesn\u2019t make older messages look stored since', async () => {
     cleanup();
-    const manager = await open();
+    class Muted extends PassthroughStrategy {
+      muted = false;
+      select(...args: Parameters<PassthroughStrategy['select']>): ContextEntry[] {
+        return this.muted ? [] : super.select(...args);
+      }
+    }
+    const strategy = new Muted();
+    const manager = await open(STORE, strategy);
     const { a1, a2 } = seed(manager);
     await manager.compile(BIG, undefined, BIND_DROP);
-    const empty = await manager.compile({ maxTokens: 1, reserveForResponse: 0 }, undefined, BIND_DROP);
-    assert.equal(empty.messages.length, 0, 'setup: nothing fits');
+    strategy.muted = true;
+    const empty = await manager.compile(BIG, undefined, BIND_DROP);
+    strategy.muted = false;
+    assert.equal(empty.messages.length, 0, 'setup: nothing sent');
     const back = await manager.compile(BIG, undefined, BIND_DROP);
     assert.deepEqual(thinkingByText(back), { U1: false, A1: false, U2: false, A2: false });
     assert.deepEqual(back.thinkingStrip, { newly: [a1, a2], cause: 'messages' });

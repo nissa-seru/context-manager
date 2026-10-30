@@ -11,6 +11,7 @@ import type {
 } from '../types/index.js';
 import { OverBudgetError } from '../adaptive/picker.js';
 import { holdsSystemChange, systemChangePositions } from '../system-changes.js';
+import { newestConversationMessage, newestTurnStage, newestTurnStart, openingFrom } from './window-edges.js';
 
 /**
  * Simple passthrough strategy that copies all messages to context.
@@ -21,9 +22,14 @@ export class PassthroughStrategy implements ContextStrategy {
   readonly name = 'passthrough';
   /**
    * Renders history raw; when it cannot all fit, the oldest is not rendered,
-   * but for its system changes, and when those alone, or those and the
-   * newest conversation message, can't fit, a committing select refuses with
-   * OverBudgetError.
+   * but for its system changes, and the request opens past each leading
+   * message holding a tool result whose call that leaves out. When those
+   * changes alone can't fit, a committing select refuses with
+   * OverBudgetError, pricing them; when the rest leaves no conversation
+   * message, it refuses pricing the changes and the newest conversation
+   * message back to the calls its tool results answer. Any other tool
+   * result whose call isn't in the request, later in it or one whose call
+   * the view doesn't hold, goes out like any other message.
    */
   readonly renderedForms = ['raw', 'omitted'] as const;
 
@@ -87,7 +93,7 @@ export class PassthroughStrategy implements ContextStrategy {
    * them a committing select refuses too, as the windowed strategy does: a
    * budget refusal, which a newer conversation message that fits clears
    * while they leave room. Without changes, a select that fits no message
-   * sends nothing, as on main. Where a change can go in a request is
+   * refuses the same way. Where a change can go in a request is
    * membrane's to say (after a user turn): this strategy can't tell a user
    * participant from another, and membrane refuses a request holding a
    * change it can't place.
@@ -122,19 +128,23 @@ export class PassthroughStrategy implements ContextStrategy {
       totalTokens += tokens;
       start = i;
     }
+    start = openingFrom(messages, start);
     // A store of changes alone gets here only when they're over the budget:
     // select() sends every message when all fit. A committing select refused
     // them above, and a dry one skips this refusal too.
-    if (start === messages.length && changes.length > 0 && !opts?.dryRun) {
-      let newest = messages.length - 1;
-      while (holdsSystemChange(messages[newest]!.content)) newest--;
-      const newestTokens = store.estimateTokens(messages[newest]!);
+    if (start === messages.length && !opts?.dryRun) {
+      const newest = newestConversationMessage(messages);
+      const turn = newestTurnStart(messages);
+      let turnTokens = 0;
+      for (let i = turn; i < messages.length; i++) {
+        if (!holdsSystemChange(messages[i]!.content)) turnTokens += store.estimateTokens(messages[i]!);
+      }
       throw new OverBudgetError({
         budget: maxTokens,
-        actual: changeTokens + newestTokens,
-        stage: 'Passthrough: its system changes and the newest conversation message',
+        actual: changeTokens + turnTokens,
+        stage: newestTurnStage('Passthrough', changes.length > 0, turn < newest),
         clearedBy: changeTokens < maxTokens ? ['newer-message'] : [],
-        diagnostics: { headTokens: changeTokens, tailTokens: newestTokens, middleTokens: 0, middleChunkCount: 0, deepestLevel: 0 },
+        diagnostics: { headTokens: changeTokens, tailTokens: turnTokens, middleTokens: 0, middleChunkCount: 0, deepestLevel: 0 },
       });
     }
 
