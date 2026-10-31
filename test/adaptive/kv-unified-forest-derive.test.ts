@@ -139,6 +139,17 @@ test('derive declines ownership removals and option changes, extends re-parentin
   assert.equal(CanonicalSummaryForest.derive(first, nextCompile(fixture()), { ...options, overlapExempt: new Set(['c0']) }), null, 'overlap exempt');
 });
 
+// Each forest flag alone decides whether a forest can be derived: the case above
+// changes both at once.
+test('derive refuses a forest built under the other treeifyNonContiguousSummaries alone', () => {
+  const off = new CanonicalSummaryForest(fixture());
+  const on = new CanonicalSummaryForest(fixture(), { treeifyNonContiguousSummaries: true });
+  assert.ok(CanonicalSummaryForest.derive(off, nextCompile(fixture()), {}), 'premise: the same flags derive, off');
+  assert.ok(CanonicalSummaryForest.derive(on, nextCompile(fixture()), { treeifyNonContiguousSummaries: true }), 'premise: and on');
+  assert.equal(CanonicalSummaryForest.derive(off, nextCompile(fixture()), { treeifyNonContiguousSummaries: true }), null, 'off, then on');
+  assert.equal(CanonicalSummaryForest.derive(on, nextCompile(fixture()), {}), null, 'on, then off');
+});
+
 test('an appended chunk linked to an L1 that does not list it stays ownerless through derive', () => {
   // Four chunks under one L1, the last summary in leaf order, so the appended
   // chunk would sit beside its leaves.
