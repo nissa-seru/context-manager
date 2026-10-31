@@ -1,0 +1,310 @@
+import { describe, it, mock, type TestContext } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { ContentBlock, NormalizedRequest } from '@animalabs/membrane';
+import { ContextManager, AutobiographicalStrategy } from '../src/index.js';
+
+type Config = ConstructorParameters<typeof AutobiographicalStrategy>[0];
+
+const MODEL = 'test-compression-model';
+const text = (t: string): ContentBlock => ({ type: 'text', text: t });
+const say = (i: number) => `message ${i}: ` + 'a considered sentence about the work at hand. '.repeat(3);
+const OK = { content: [text('A summary of what happened.')], stopReason: 'end_turn', usage: { inputTokens: 80, outputTokens: 20 } };
+const transient = (type = 'overloaded') => Object.assign(new Error(`zz ${type} failure`), { type, retryable: true });
+const admissionDeferral = () => Object.assign(new Error('zz held by provider admission'), {
+  type: 'rate_limit', retryable: true, providerAdmission: 'deferred', retryAfterMs: 0,
+});
+
+type Step = typeof OK | { throw: unknown };
+function scripted(steps: Step[] = [OK]) {
+  const calls: NormalizedRequest[] = [];
+  return {
+    calls,
+    membrane: {
+      complete: async (request: NormalizedRequest) => {
+        const step = steps[Math.min(calls.length, steps.length - 1)]!;
+        calls.push(structuredClone(request));
+        if ('throw' in step) throw step.throw;
+        return step;
+      },
+    } as never,
+  };
+}
+
+function config(extra: Partial<Config> = {}): Config {
+  return {
+    compressionModel: MODEL,
+    targetChunkTokens: 100,
+    headWindowTokens: 0,
+    recentWindowTokens: 0,
+    l1HoldbackChunks: 0,
+    ...extra,
+  } as Config;
+}
+
+function storePath(t: TestContext): string {
+  const dir = mkdtempSync(join(tmpdir(), 'cm-drain-lifecycle-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return join(dir, 'store');
+}
+
+function pendingChunks(manager: ContextManager): number {
+  const match = manager.getPendingWork()?.description.match(/(\d+) chunks/);
+  return match ? Number(match[1]) : 0;
+}
+
+function addUntilQueued(manager: ContextManager, chunks: number, add: () => void): void {
+  for (let added = 0; pendingChunks(manager) < chunks; added++) {
+    assert.ok(added < 50, `premise: ${chunks} chunk(s) queued (${manager.getPendingWork()?.description})`);
+    add();
+  }
+}
+
+async function until(cond: () => boolean, what: string, ms = 5_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+}
+
+async function turns(n: number): Promise<void> {
+  for (let i = 0; i < n; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+async function drain(manager: ContextManager): Promise<void> {
+  for (let i = 0; i < 200 && !manager.isReady(); i++) await manager.tick();
+  assert.ok(manager.isReady(), `drained: ${manager.getPendingWork()?.description}`);
+}
+
+function l1Sources(manager: ContextManager): string[][] {
+  const stored = manager.getStore().getStateJson('default/autobio:summaries');
+  return (Array.isArray(stored) ? stored : [])
+    .filter((s: { level?: number }) => s?.level === 1)
+    .map((s: { sourceIds: string[] }) => s.sourceIds);
+}
+
+async function closedChunksStore(t: TestContext): Promise<string> {
+  const path = storePath(t);
+  const manager = await ContextManager.open({ path, strategy: new AutobiographicalStrategy(config()) });
+  for (let i = 0; i < 12; i++) manager.addMessage(i % 2 ? 'Claude' : 'User', [text(say(i))]);
+  assert.ok(pendingChunks(manager) >= 2, `premise: chunks closed (${manager.getPendingWork()?.description})`);
+  manager.close();
+  return path;
+}
+
+describe('compression lifecycle: the tick, the drain and holds', () => {
+  it('without a membrane, tick() warns, makes no call and keeps the closed chunks queued for an open that has one', async (t) => {
+    const path = await closedChunksStore(t);
+    const warn = mock.method(console, 'warn', () => {});
+    try {
+      const bare = await ContextManager.open({ path, strategy: new AutobiographicalStrategy(config()) });
+      const before = bare.getPendingWork()?.description;
+      await bare.tick();
+      assert.ok(
+        warn.mock.calls.some((call) => String(call.arguments[0]).includes('No membrane instance for compression')),
+        'the tick says compression has no membrane',
+      );
+      assert.equal(bare.getPendingWork()?.description, before, 'the queued work is as it was');
+      bare.close();
+    } finally {
+      warn.mock.restore();
+    }
+    const { membrane, calls } = scripted();
+    const manager = await ContextManager.open({ path, strategy: new AutobiographicalStrategy(config()), membrane });
+    await drain(manager);
+    assert.ok(calls.length >= 2 && l1Sources(manager).length === calls.length, `${calls.length} calls, ${l1Sources(manager).length} L1s`);
+    manager.close();
+  });
+
+  it('a queued chunk with a held message ends the scan: an earlier chunk queued behind it after a failure waits too, until the release', async (t) => {
+    mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    t.after(() => mock.timers.reset());
+    const { membrane, calls } = scripted([{ throw: transient() }, OK]);
+    const manager = await ContextManager.open({ path: storePath(t), strategy: new AutobiographicalStrategy(config()), membrane });
+    const ids: string[] = [];
+    const add = () => ids.push(manager.addMessage(ids.length % 2 ? 'Claude' : 'User', [text(say(ids.length))]));
+    addUntilQueued(manager, 1, add);
+    await assert.rejects(manager.tick(), /zz overloaded failure/);
+    const firstLater = ids.length;
+    addUntilQueued(manager, 2, add);
+    mock.timers.setTime(Date.now() + 60_000);
+    manager.holdCompression([ids[firstLater]!]);
+    await manager.tick();
+    assert.equal(calls.length, 1, 'no call while the head of the queue is held');
+    manager.releaseCompression([ids[firstLater]!]);
+    await drain(manager);
+    const covered = l1Sources(manager).flat();
+    assert.ok(covered.includes(ids[0]!) && covered.includes(ids[firstLater]!), 'both chunks are summarised after the release');
+    manager.close();
+  });
+
+  it('releasing a hold resumes the auto-tick drain with no further message', async (t) => {
+    const { membrane, calls } = scripted();
+    const manager = await ContextManager.open({
+      path: storePath(t),
+      strategy: new AutobiographicalStrategy(config({ autoTickOnNewMessage: true })),
+      membrane,
+    });
+    const held = manager.addMessage('User', [text(say(0))], undefined, undefined, { holdCompression: true });
+    for (let i = 1; i < 12; i++) manager.addMessage(i % 2 ? 'Claude' : 'User', [text(say(i))]);
+    await turns(20);
+    assert.equal(calls.length, 0, 'premise: the hold keeps every chunk back');
+    manager.releaseCompression([held]);
+    await until(() => calls.length > 0 && manager.isReady(), 'the drain the release starts');
+    assert.ok(l1Sources(manager).flat().includes(held));
+    manager.close();
+  });
+
+  it('readiness names a pause only while it stands', async (t) => {
+    mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    t.after(() => mock.timers.reset());
+    const { membrane } = scripted([{ throw: transient() }, OK]);
+    const manager = await ContextManager.open({ path: storePath(t), strategy: new AutobiographicalStrategy(config()), membrane });
+    let said = 0;
+    addUntilQueued(manager, 1, () => manager.addMessage(said % 2 ? 'Claude' : 'User', [text(say(said++))]));
+    await assert.rejects(manager.tick(), /zz overloaded failure/);
+    assert.match(manager.getPendingWork()?.description ?? '', /chunks pending; compression paused/);
+    mock.timers.setTime(Date.now() + 60_000);
+    const after = manager.getPendingWork()?.description ?? '';
+    assert.match(after, /chunks pending/, 'the work is still queued');
+    assert.doesNotMatch(after, /paused/, 'the pause has ended');
+    await drain(manager);
+    manager.close();
+  });
+
+  it('the drain starts nothing after a tick that threw, until the next message', async (t) => {
+    const path = await closedChunksStore(t);
+    const { membrane, calls } = scripted([{ throw: admissionDeferral() }, OK]);
+    const errors = mock.method(console, 'error', () => {});
+    t.after(() => errors.mock.restore());
+    const manager = await ContextManager.open({
+      path,
+      strategy: new AutobiographicalStrategy(config({ autoTickOnNewMessage: true })),
+      membrane,
+    });
+    manager.addMessage('User', [text(say(100))]);
+    await until(
+      () => errors.mock.calls.some((call) => String(call.arguments[0]).includes('speculative-drain error')),
+      'the drain to log the thrown tick',
+    );
+    await turns(50);
+    assert.equal(calls.length, 1, 'nothing resumed the drain');
+    manager.addMessage('Claude', [text(say(101))]);
+    await until(() => calls.length > 1, 'the next message to resume the drain');
+    manager.close();
+  });
+
+  it("a false preflight hook doesn't stop a drain while a merge is queued", async (t) => {
+    class NoPreflight extends AutobiographicalStrategy {
+      protected override shouldCompressPreflight(): boolean {
+        return false;
+      }
+    }
+    const { membrane, calls } = scripted();
+    const manager = await ContextManager.open({
+      path: storePath(t),
+      strategy: new NoPreflight(config({ autoTickOnNewMessage: true, hierarchical: true, mergeThreshold: 2 })),
+      membrane,
+    });
+    for (let i = 0; i < 24; i++) manager.addMessage(i % 2 ? 'Claude' : 'User', [text(say(i))]);
+    await turns(20);
+    assert.equal(calls.length, 0, 'premise: no drain runs for L1 work alone');
+    for (let i = 0; i < 50 && !/merges/.test(manager.getPendingWork()?.description ?? ''); i++) await manager.tick();
+    assert.match(manager.getPendingWork()?.description ?? '', /merges pending/, 'premise: a merge is queued');
+    const before = calls.length;
+    manager.addMessage('User', [text(say(100))]);
+    await until(() => manager.getMaxSummaryLevel() >= 2, 'the drain to run the merge');
+    assert.ok(calls.length > before);
+    manager.close();
+  });
+
+  it("releasing a sharded add's id releases every shard", async (t) => {
+    const manager = await ContextManager.open({
+      path: storePath(t),
+      strategy: new AutobiographicalStrategy(config({ adaptiveResolution: true, targetChunkTokens: 50 })),
+      membrane: scripted().membrane,
+    });
+    const id = manager.addMessage('User', [text('a long passage of reasoning. '.repeat(80))], undefined, undefined, { holdCompression: true });
+    assert.ok(manager.getCompressionHolds().size > 1, `premise: the add was sharded (${manager.getCompressionHolds().size} held)`);
+    manager.releaseCompression([id]);
+    assert.deepEqual([...manager.getCompressionHolds()], []);
+    manager.close();
+  });
+
+  it("a mechanical stub is no provider answer: the lane's failure count carries to its next failure", async (t) => {
+    mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    t.after(() => mock.timers.reset());
+    const { membrane, calls } = scripted([{ throw: transient() }, { throw: transient() }, OK]);
+    const manager = await ContextManager.open({
+      path: storePath(t),
+      strategy: new AutobiographicalStrategy(config({ minChunkCharsForLLM: 200, targetChunkTokens: 40 })),
+      membrane,
+    });
+    for (let i = 0; i < 4; i++) manager.addMessage(i % 2 ? 'Claude' : 'User', [text(say(i))]);
+    assert.equal(pendingChunks(manager), 1, `premise: one substantive chunk (${manager.getPendingWork()?.description})`);
+    await assert.rejects(manager.tick(), /zz overloaded failure/);
+    assert.match(manager.getPendingWork()?.description ?? '', /failure 1\b/);
+    for (let i = 0; i < 4; i++) manager.addMessage(i % 2 ? 'Claude' : 'User', [text('.' + ' '.repeat(120))]);
+    assert.equal(pendingChunks(manager), 2, `premise: a thin chunk queued too (${manager.getPendingWork()?.description})`);
+    mock.timers.setTime(Date.now() + 60_000);
+    await manager.tick();
+    assert.equal(calls.length, 1, 'premise: the thin chunk landed as a stub, with no call');
+    assert.equal(l1Sources(manager).length, 1);
+    await assert.rejects(manager.tick(), /zz overloaded failure/);
+    assert.match(manager.getPendingWork()?.description ?? '', /failure 2\b/, 'the stub ended no run of failures');
+    manager.close();
+  });
+
+  it('once the queue drains, every message in the compressible zone but the open chunk is covered by an L1, through a tool round, a quiet stretch, a hold, a restart and a failed call', async (t) => {
+    mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    t.after(() => mock.timers.reset());
+    const path = storePath(t);
+    const options = config({ hierarchical: true, minChunkCharsForLLM: 200 });
+    const tools = [{ name: 'search', description: 'search', inputSchema: { type: 'object' as const, properties: {} } }];
+    let n = 0;
+    const add = (manager: ContextManager, content: ContentBlock[], hold = false) =>
+      manager.addMessage(n++ % 2 ? 'Claude' : 'User', content, undefined, undefined, hold ? { holdCompression: true } : undefined);
+    const settle = async (manager: ContextManager) => {
+      for (let i = 0; i < 300 && !manager.isReady(); i++) {
+        await manager.tick().catch(() => {});
+        if (/paused/.test(manager.getPendingWork()?.description ?? '')) mock.timers.setTime(Date.now() + 15 * 60_000);
+      }
+      assert.ok(manager.isReady(), `premise: the queue drained (${manager.getPendingWork()?.description})`);
+    };
+    {
+      const manager = await ContextManager.open({ path, strategy: new AutobiographicalStrategy(options), membrane: scripted().membrane });
+      manager.setToolDefinitions(tools);
+      for (let i = 0; i < 10; i++) add(manager, [text(say(n))]);
+      add(manager, [text('let me look that up'), { type: 'tool_use', id: 'tu-1', name: 'search', input: { q: 'x' } } as ContentBlock]);
+      add(manager, [{ type: 'tool_result', toolUseId: 'tu-1', content: 'found it' } as ContentBlock]);
+      for (let i = 0; i < 4; i++) add(manager, [text('.' + ' '.repeat(120))]);
+      await settle(manager);
+      const held = add(manager, [text(say(n))], true);
+      for (let i = 0; i < 8; i++) add(manager, [text(say(n))]);
+      await settle(manager);
+      manager.releaseCompression([held]);
+      await settle(manager);
+      for (let i = 0; i < 5; i++) add(manager, [text(say(n))]);
+      manager.close();
+    }
+    const manager = await ContextManager.open({
+      path,
+      strategy: new AutobiographicalStrategy(options),
+      membrane: scripted([{ throw: transient() }, OK]).membrane,
+    });
+    manager.setToolDefinitions(tools);
+    for (let i = 0; i < 6; i++) add(manager, [text(say(n) + 'more of the same thought, at length. '.repeat(20))]);
+    await settle(manager);
+    const covered = new Set(l1Sources(manager).flat());
+    const all = manager.getAllMessages().map((m) => m.id);
+    const first = all.findIndex((id) => !covered.has(id));
+    const open = first === -1 ? [] : all.slice(first);
+    assert.ok(open.length < all.length, 'premise: something was compressed');
+    assert.deepEqual(open.filter((id) => covered.has(id)), [], 'the covered messages are a prefix');
+    assert.ok(open.length < 4, `only the open chunk is uncovered (${open.length} of ${all.length} messages)`);
+    manager.close();
+  });
+});
