@@ -284,6 +284,27 @@ describe('fold journal', () => {
     cm.close();
   });
 
+  it("prices a receipt's rendered tokens at the store's calibration multiplier", async () => {
+    class Calibrating extends ScriptedStrategy {
+      multiplier = 1;
+      select(store: MessageStoreView, log: ContextLogView, budget: TokenBudget): ContextEntry[] {
+        store.setTokenCalibration?.(this.multiplier);
+        return super.select(store, log, budget);
+      }
+    }
+    const strategy = new Calibrating();
+    const { cm } = await open(strategy);
+    const ids = add(cm, 6);
+    const baseline = await acceptCompile(cm);
+    const atOne = baseline!.renderedTokens.after;
+    assert.ok(typeof atOne === 'number' && atOne > 0, 'setup: the baseline gives its rendered tokens');
+    strategy.multiplier = 1.5;
+    for (const id of ids.slice(1, 4)) strategy.plan.set(id, { summary: 'L1-0', level: 1 });
+    const receipt = await acceptCompile(cm);
+    assert.equal(receipt!.renderedTokens.before, Math.round(atOne * 1.5), 'the same layout, at 1.5');
+    cm.close();
+  });
+
   it('reports a deeper fold, an immediate fold-down from raw, an unfold and window omission', async () => {
     const { cm, strategy } = await open();
     const ids = add(cm, 8);
