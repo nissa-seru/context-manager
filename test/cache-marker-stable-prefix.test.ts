@@ -139,3 +139,13 @@ test('never more than 3 message-level markers', () => {
     assert.ok(marksOf(es).length <= 3, `round ${round}: ${marksOf(es)}`);
   }
 });
+
+test('with no deep band, a compile whose prefix changes inside the head marks no entry there but the first slot', () => {
+  const s = new Exposed({});
+  const a = fixture();
+  s.place(a.es, a.head, a.tail);
+  const b = fixture();
+  b.es[1] = entry('h1', 'sys-b, edited');
+  s.place(b.es, b.head, b.tail);
+  assert.deepEqual(marksOf(b.es), [1, 10]);
+});
