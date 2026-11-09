@@ -245,6 +245,23 @@ describe('a summary weighed against its messages sent raw, on the hierarchical s
     await f.manager.close();
   });
 
+  it('sends each message once where an L2 whose L1s overlap costs more than its messages', async () => {
+    const f = await frontier((manager) => {
+      for (let i = 0; i < 8; i++) manager.addMessage(i % 2 ? 'agent' : 'user', text(`middle ${i} ` + words(8)));
+    });
+    const leaves = f.ids.slice(4, 10);
+    const first = f.strategy.seed('L1-first', 1, leaves.slice(0, 4), leaves[0]!, leaves[3]!);
+    const second = f.strategy.seed('L1-second', 1, leaves.slice(2), leaves[2]!, leaves[5]!);
+    const l2 = f.strategy.seed('L2-over-both', 2, [first.id, second.id], leaves[0]!, leaves[5]!);
+    first.mergedInto = second.mergedInto = l2.id;
+    f.dearer(l2);
+
+    const wide = await f.sent(1_000_000);
+    for (const s of [l2, first, second]) assert.ok(!wide.summaries.has(s.id), `no recall pair for ${s.id}`);
+    f.rawInOrder(wide, leaves);
+    await f.manager.close();
+  });
+
   it('with positionedRecallPairs false and no maxMessageTokens, sends the messages raw after the combined pair in place of a summary that costs more than they do; with a cap, keeps it in the combined answer', async () => {
     for (const capped of [false, true]) {
       const f = await built({ positionedRecallPairs: false, ...(capped ? { maxMessageTokens: 1_000_000 } : {}) });

@@ -107,15 +107,19 @@ describe('AutobiographicalStrategy — pins / documents (gap #3)', () => {
     const pinIdx = allTexts.findIndex(t => t.includes('PINNED-DOCUMENT-CONTENT'));
     assert.ok(pinIdx >= 0, 'pinned message text should be visible verbatim in output');
 
-    // The two summaries should also be present.
-    const alphaIdx = allTexts.findIndex(t => t.includes('summary about alpha'));
-    const gammaIdx = allTexts.findIndex(t => t.includes('summary about gamma'));
-    assert.ok(alphaIdx >= 0, 'alpha summary should appear');
-    assert.ok(gammaIdx >= 0, 'gamma summary should appear');
+    // The pin closes a chunk over alpha that compression doesn't take up, so alpha goes raw, and gamma's message
+    // costs less than its summary's recall pair. Each goes out raw once, and neither summary goes out.
+    const alphaIdx = allTexts.indexOf('alpha');
+    const gammaIdx = allTexts.indexOf('gamma');
+    assert.ok(alphaIdx >= 0, 'alpha should appear');
+    assert.ok(gammaIdx >= 0, 'gamma should appear');
+    assert.equal(allTexts.filter(t => t === 'alpha').length, 1, 'alpha goes out once');
+    assert.equal(allTexts.filter(t => t === 'gamma').length, 1, 'gamma goes out once');
+    assert.ok(!allTexts.some(t => t.includes('summary about')), 'no summary goes out beside its own messages');
 
-    // Chronological order: alpha summary < pinned m2 < gamma summary
-    assert.ok(alphaIdx < pinIdx, `alpha summary should come before pinned m2 (alpha=${alphaIdx} pin=${pinIdx})`);
-    assert.ok(pinIdx < gammaIdx, `pinned m2 should come before gamma summary (pin=${pinIdx} gamma=${gammaIdx})`);
+    // Chronological order: alpha < pinned m2 < gamma
+    assert.ok(alphaIdx < pinIdx, `alpha should come before pinned m2 (alpha=${alphaIdx} pin=${pinIdx})`);
+    assert.ok(pinIdx < gammaIdx, `pinned m2 should come before gamma (pin=${pinIdx} gamma=${gammaIdx})`);
 
     manager.close();
   });

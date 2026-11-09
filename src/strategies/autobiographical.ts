@@ -721,7 +721,8 @@ function answeredToolCalls(messages: readonly StoredMessage[]): Map<string, Answ
 
 /** A view's tool blocks in send order: the message each sits in, its partner
  *  by answeredCallIndexes, how many results answer each call, and the
- *  messages of each call and its result in a later message. */
+ *  messages of each call and its result two messages after it or more, the
+ *  only ones with a message between them. */
 type ToolRounds = {
   blocks: ContentBlock[];
   messageOf: number[];
@@ -753,7 +754,7 @@ function toolRoundsOf(messages: readonly StoredMessage[]): ToolRounds {
     partnerOf.set(at, callAt);
     partnerOf.set(callAt, at);
     results.set(callAt, (results.get(callAt) ?? 0) + 1);
-    if (messageOf[callAt]! < messageOf[at]!) spans.push([messageOf[callAt]!, messageOf[at]!]);
+    if (messageOf[callAt]! + 1 < messageOf[at]!) spans.push([messageOf[callAt]!, messageOf[at]!]);
   });
   return { blocks, messageOf, blocksOf, partnerOf, results, spans };
 }
@@ -767,6 +768,12 @@ function toolRoundsOf(messages: readonly StoredMessage[]): ToolRounds {
  *  that it holds neither of. */
 function keepsToolRoundsWhole(rounds: ToolRounds, positions: readonly number[], goesRaw: (position: number) => boolean): boolean {
   const sent = new Set(positions);
+  let first = Infinity;
+  let last = -Infinity;
+  for (const p of sent) {
+    first = Math.min(first, p);
+    last = Math.max(last, p);
+  }
   for (const p of sent) {
     for (const i of rounds.blocksOf.get(p) ?? []) {
       const partner = rounds.partnerOf.get(i);
@@ -780,7 +787,7 @@ function keepsToolRoundsWhole(rounds: ToolRounds, positions: readonly number[], 
     }
   }
   for (const [call, result] of rounds.spans) {
-    if (sent.has(call) || sent.has(result) || !goesRaw(call) || !goesRaw(result)) continue;
+    if (call >= last || result <= first || sent.has(call) || sent.has(result) || !goesRaw(call) || !goesRaw(result)) continue;
     for (const p of sent) if (p > call && p < result) return false;
   }
   return true;
@@ -18917,7 +18924,7 @@ export class AutobiographicalStrategy implements ResettableStrategy {
           const leaves: { msg: StoredMessage; position: number }[] = [];
           let raw = 0;
           let inView = true;
-          for (const id of leavesOf(s)) {
+          for (const id of new Set(leavesOf(s))) {
             if (rawPlanned.has(id)) continue;
             const position = positionOf.get(id);
             // A removal in legacy mode keeps the summary that folded the row, which alone holds it now.
