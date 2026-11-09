@@ -132,8 +132,6 @@ export async function renderHierarchicalFixture(
     });
     const manager = await ContextManager.open({ path, strategy });
 
-    // Four messages a turn, so that under the tightest cap here, where each raw message is priced as the cap
-    // leaves it, a turn's messages still cost more than its summary's recall pair, and the pair goes out.
     const said = (turn: string): ContentBlock[] => textContent(`${turn} ` + 'words of the turn as it was first said '.repeat(8));
     const turn = (name: string): string[] => ['a', 'b', 'c', 'd'].map((part) => manager.addMessage('user', said(`${name}-${part}`)));
     const zz1 = turn('zz-turn-one');

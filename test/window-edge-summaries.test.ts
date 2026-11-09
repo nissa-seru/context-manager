@@ -48,7 +48,6 @@ const SELECTS = {
 
 class Edges extends AutobiographicalStrategy {
   ruleOff = false;
-  /** The summaries the window rule left out at the last select. */
   lastAcross: ReadonlySet<string> = new Set();
   produced: unknown[] = [];
   leftOut = 0;
@@ -598,8 +597,6 @@ describe('a call and its results, where a window holds part of a summary', () =>
       const { messages, raw, sent, repaired } = await sends(100_000);
       assert.ok(raw.has(all[6]!.id), "premise: the window's summary is left out, so its result goes raw");
       assert.ok(!strategy.lastAcross.has('L1-A'), "the window rule doesn't leave out the summary over the pinned call");
-      // On the hierarchical select every message under L1-A goes raw here (the chunk holding them is uncompressed,
-      // and the pin holds the call), so it sends those messages and not L1-A beside them.
       if (select === 'hierarchical') assert.ok(!sent.includes('L1-A') && raw.has(all[2]!.id), 'its messages go out raw, and L1-A not beside them');
       else assert.ok(sent.includes('L1-A'), 'the summary over the pinned call goes out');
       assert.ok(pairedInRequest(messages, 't1'), 'the pinned call goes out with its result in the next message');

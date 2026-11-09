@@ -107,8 +107,6 @@ describe('AutobiographicalStrategy — pins / documents (gap #3)', () => {
     const pinIdx = allTexts.findIndex(t => t.includes('PINNED-DOCUMENT-CONTENT'));
     assert.ok(pinIdx >= 0, 'pinned message text should be visible verbatim in output');
 
-    // The pin closes a chunk over alpha that compression doesn't take up, so alpha goes raw, and gamma's message
-    // costs less than its summary's recall pair. Each goes out raw once, and neither summary goes out.
     const alphaIdx = allTexts.indexOf('alpha');
     const gammaIdx = allTexts.indexOf('gamma');
     assert.ok(alphaIdx >= 0, 'alpha should appear');
@@ -117,7 +115,6 @@ describe('AutobiographicalStrategy — pins / documents (gap #3)', () => {
     assert.equal(allTexts.filter(t => t === 'gamma').length, 1, 'gamma goes out once');
     assert.ok(!allTexts.some(t => t.includes('summary about')), 'no summary goes out beside its own messages');
 
-    // Chronological order: alpha < pinned m2 < gamma
     assert.ok(alphaIdx < pinIdx, `alpha should come before pinned m2 (alpha=${alphaIdx} pin=${pinIdx})`);
     assert.ok(pinIdx < gammaIdx, `pinned m2 should come before gamma (pin=${pinIdx} gamma=${gammaIdx})`);
 

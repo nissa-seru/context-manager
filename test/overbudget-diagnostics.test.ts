@@ -3225,9 +3225,7 @@ describe('OverBudgetError in the hierarchical middle', () => {
       const strategy = middleStrategy({ positionedRecallPairs, targetChunkTokens: 40 });
       await withManager(strategy, async (manager) => {
         const ids = Array.from({ length: 12 }, (_, i) => say(manager, i));
-        // An L1 over m0 alone, which no chunk matches, so the chunk that holds m0 is covered and isn't work. That
-        // chunk is uncompressed, so m0 goes raw, and the L1 over it isn't sent beside it: m0, first in the middle,
-        // refuses.
+        // An L1 over m0 alone, which no chunk matches, so the chunk that holds m0 is covered and isn't work.
         strategy.seedUndercountedL1('L1-first', [ids[0]!]);
         const first = await refusal(manager);
         assert.equal(unit(first), positionedRecallPairs ? 'selection-items' : 'raw-messages');
@@ -3237,7 +3235,6 @@ describe('OverBudgetError in the hierarchical middle', () => {
         assert.deepEqual(first.clearedBy, [], 'it folds nothing m0 refused with');
         // A refusal past those messages holds them, so the same work counts.
         assert.deepEqual((await refusalOfWholeMiddle(manager)).clearedBy, ['compression']);
-        // A merge of the L1 over m0 can fold it.
         strategy.seedUndercountedL1('L1-second', [ids[1]!]);
         strategy.queueMergeOf(['L1-first', 'L1-second']);
         assert.deepEqual((await refusal(manager)).clearedBy, ['compression']);
@@ -3266,11 +3263,9 @@ describe('OverBudgetError in the hierarchical middle', () => {
     const strategy = middleStrategy({ positionedRecallPairs: false, targetChunkTokens: 40 });
     await withManager(strategy, async (manager) => {
       const ids = Array.from({ length: 12 }, (_, i) => say(manager, i));
-      // m0's chunk is uncompressed, so m0 goes raw, and the L1 over it isn't sent beside it: m0 refuses first.
       strategy.seedUndercountedL1('L1-first', [ids[0]!]);
       const first = await refusal(manager);
       assert.equal(unit(first), 'raw-messages', 'the premise: raw m0 refuses first');
-      // Past m0, m1 raw after it refuses; m1's chunk is covered (it holds m0), and the queued one after it is not in the prefix.
       const raw = await refusal(manager, undefined, holding(first.actual));
       assert.equal(unit(raw), 'raw-messages');
       assert.equal(Reflect.get(raw.diagnostics, 'middleTokens'), raw.actual, 'm0 and m1');
@@ -3328,7 +3323,6 @@ describe('OverBudgetError in the hierarchical middle', () => {
   it('sums the combined pair\'s floors over its summaries, and names its count and its deepest level', async () => {
     const strategy = middleStrategy({ positionedRecallPairs: false });
     await withManager(strategy, async (manager) => {
-      // m0's L1 is floored at 400, so m0 is long enough to cost more than that.
       const ids = [manager.addMessage('user', [{ type: 'text', text: 'message 0 ' + 'word '.repeat(300) }]), sayCovered(manager, 1)];
       strategy.seedCarrierL1('L1-carrier', [ids[0]!], 400);
       strategy.seedL1('L1-merged', [ids[1]!], 'L2-carrier');
@@ -3466,6 +3460,7 @@ describe('OverBudgetError in the hierarchical middle', () => {
       assert.equal(await outcome(positionedRecallPairs), undefined, 'the premise: at the default rate the pair fits');
       const refused = await outcome(positionedRecallPairs, twice);
       assert.ok(refused, `${positionedRecallPairs ? 'positioned' : 'combined'}: refused at the store's rate`);
+      assert.match(refused.message, /attempted representation level=L1/, "the L1's pair is what refuses");
       assert.ok(refused.actual > 300, String(refused.actual));
     }
   });
