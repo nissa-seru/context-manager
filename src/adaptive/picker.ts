@@ -183,9 +183,12 @@ export interface OverBudgetRawPin {
  *   as before, since nothing says what it folds. Whether that work is
  *   enough to fit isn't checked, so a host can tell an agent that
  *   compression may make room, not that it will.
- * - `'newer-message'`: the newest message, with the system changes sent
- *   beside it, is over the budget, and a newer conversation message that
- *   fits beside them moves the window past it (a newer change doesn't).
+ * - `'newer-message'`: a passthrough strategy's walk back from the newest
+ *   message stops at a message larger than the room the system changes
+ *   leave, and newer conversation that alone overflows that room (under the
+ *   windowed strategy, its re-anchor share of it) moves the window past it.
+ *   Newer conversation that doesn't overflow it, such as one short message,
+ *   doesn't, nor does a newer change.
  * - `'smaller-recent-window'`: the raw recent window, which compression never
  *   touches, is what's over the budget, and the head fits beside the newest
  *   turn as the compile must keep it raw, or beside everything from a

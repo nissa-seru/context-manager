@@ -35,6 +35,7 @@ import {
 } from '../live-image-limits.js';
 import { holdsSystemChange, systemChangePositions } from '../system-changes.js';
 import { roomUnderRequestLimit } from '../request-limit.js';
+import { walkStopRefusal } from './walk-stop-refusal.js';
 
 /**
  * Options for {@link WindowedPassthroughStrategy}.
@@ -81,8 +82,9 @@ export interface WindowedPassthroughOptions {
    * principal's value so the two see the same truncation policy. Images are
    * not subject to this cap; they are governed by the live-image policy
    * below. Unset, or any value that isn't a positive number, = no
-   * truncation, in which case a single message larger than the usable
-   * budget is refused (see {@link OverBudgetError}).
+   * truncation, in which case a committing compile refuses a message larger
+   * than the usable budget less the system changes wherever the window's walk
+   * back from the newest message stops at it (see {@link OverBudgetError}).
    */
   maxMessageTokens?: number;
   /**
@@ -219,12 +221,13 @@ const DEFAULT_MAX_LIVE_IMAGE_BYTES = 20 * 1024 * 1024;
  *
  * **Hard budget.** After per-message shaping (truncation, image policy) the
  * window is priced against `maxTokens - reserveForResponse`. Overflow
- * re-anchors; if the single newest message alone still exceeds the usable
- * budget, or with system changes, the changes and the newest conversation
- * message, or the changes alone, the strategy refuses with
- * {@link OverBudgetError} (the framework's over-budget breaker handles it)
- * rather than emitting a request the provider will reject. Previews report
- * the oversized window instead.
+ * re-anchors. When the re-anchor's walk back from the newest message stops
+ * at a message larger than the usable budget less the system changes, which
+ * no window can hold though every newer message fits, or when the budget
+ * leaves no room after the response reserve, or the changes leave none, the
+ * strategy refuses with {@link OverBudgetError} (the framework's over-budget
+ * breaker handles it) rather than leave the message out or emit a request
+ * the provider will reject. Previews report the window instead.
  */
 export class WindowedPassthroughStrategy implements ContextStrategy {
   readonly name = 'windowed-passthrough';
@@ -753,7 +756,16 @@ export class WindowedPassthroughStrategy implements ContextStrategy {
       for (let i = messages.length - 1; i >= start; i--) {
         if (holdsSystemChange(messages[i]!.content)) continue; // priced above
         const tokens = priced(i);
-        if (acc + tokens > target) break;
+        if (acc + tokens > target) {
+          const refusal = opts?.dryRun
+            ? undefined
+            : walkStopRefusal(
+              'Windowed passthrough', 'remove or edit it, set maxMessageTokens, or raise the budget',
+              messages[i]!, tokens, { count: changes.length, tokens: changeTokens }, maxTokens,
+            );
+          if (refusal) throw refusal;
+          break;
+        }
         acc += tokens;
         newStart = i;
       }
@@ -780,28 +792,25 @@ export class WindowedPassthroughStrategy implements ContextStrategy {
       }
     }
 
-    // Hard budget: the progress clause above can leave a single newest
-    // message larger than the usable budget. Never emit it — the provider
-    // would reject the request; refuse loudly instead (the framework
-    // recognizes OverBudgetError and runs its over-budget breaker), as the
-    // autobiographical strategy does. Previews report rather than throw.
-    // The anchor moves only for a compile that sends, below: a refused one
-    // leaves it where the last sent window started, so the turns that fit
-    // once the caller consolidates its changes are still in the window.
+    // Hard budget: when the budget leaves no room after the response reserve,
+    // or the system changes leave none, no window fits.
+    // Never emit it — the provider would reject the request; refuse loudly
+    // instead (the framework recognizes OverBudgetError and runs its
+    // over-budget breaker), as the autobiographical strategy does. Previews
+    // report rather than throw. The anchor moves only for a compile that
+    // sends, below: a refused one leaves it where the last sent window
+    // started, so the turns that fit once the caller consolidates its
+    // changes are still in the window.
     if (total > maxTokens && !opts?.dryRun) {
       throw new OverBudgetError({
         budget: maxTokens,
         actual: total,
         stage: changeTokens === 0
-          ? 'Windowed passthrough: the newest message alone'
+          ? 'Windowed passthrough: the budget leaves no room after the response reserve'
           : total > changeTokens
             ? 'Windowed passthrough: its system changes and the newest conversation message'
             : 'Windowed passthrough: its system changes alone',
-        // No compression here: the window moves past this message once a
-        // newer one that fits arrives (the progress clause above). System
-        // changes go out wherever the window starts, so once they leave no
-        // room for a message only the caller, consolidating them, clears it.
-        clearedBy: changeTokens < maxTokens ? ['newer-message'] : [],
+        clearedBy: [],
         diagnostics: {
           headTokens: changeTokens,
           tailTokens: total - changeTokens,

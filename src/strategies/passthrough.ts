@@ -12,6 +12,7 @@ import type {
 import { OverBudgetError } from '../adaptive/picker.js';
 import { roomUnderRequestLimit } from '../request-limit.js';
 import { holdsSystemChange, systemChangePositions } from '../system-changes.js';
+import { walkStopRefusal } from './walk-stop-refusal.js';
 
 /**
  * Simple passthrough strategy that copies all messages to context.
@@ -22,9 +23,11 @@ export class PassthroughStrategy implements ContextStrategy {
   readonly name = 'passthrough';
   /**
    * Renders history raw; when it cannot all fit, the oldest is not rendered,
-   * but for its system changes, and when those alone, or those and the
-   * newest conversation message, can't fit, a committing select refuses with
-   * OverBudgetError.
+   * but for its system changes. A committing select refuses with
+   * OverBudgetError when the budget leaves no room after the response
+   * reserve, when the changes alone leave none, and when the walk back from
+   * the newest message stops at a message larger than the room they leave,
+   * which no window can hold though every newer message fits.
    */
   readonly renderedForms = ['raw', 'omitted'] as const;
 
@@ -88,15 +91,10 @@ export class PassthroughStrategy implements ContextStrategy {
    * changes the tools and system text everything after it was read with
    * (system-changes.ts). Its tokens are set aside first, and when they alone
    * exceed the budget a committing select refuses: only the caller, by
-   * consolidating its changes, can clear that. A change is no conversation
-   * message, so when the newest conversation message doesn't fit beside
-   * them a committing select refuses too, as the windowed strategy does: a
-   * budget refusal, which a newer conversation message that fits clears
-   * while they leave room. Without changes, a select that fits no message
-   * sends nothing, as on main. Where a change can go in a request is
-   * membrane's to say (after a user turn): this strategy can't tell a user
-   * participant from another, and membrane refuses a request holding a
-   * change it can't place.
+   * consolidating its changes, can clear that. Where a change can go in a
+   * request is membrane's to say (after a user turn): this strategy can't
+   * tell a user participant from another, and membrane refuses a request
+   * holding a change it can't place.
    */
   private selectFromEnd(store: MessageStoreView, maxTokens: number, opts?: SelectOptions): ContextEntry[] {
     const messages = store.getAll();
@@ -122,6 +120,10 @@ export class PassthroughStrategy implements ContextStrategy {
       const tokens = store.estimateTokens(msg);
 
       if (totalTokens + tokens > maxTokens) {
+        const refusal = opts?.dryRun
+          ? undefined
+          : walkStopRefusal('Passthrough', 'remove or edit it, or raise the budget', msg, tokens, { count: changes.length, tokens: changeTokens }, maxTokens);
+        if (refusal) throw refusal;
         break;
       }
 
@@ -139,7 +141,7 @@ export class PassthroughStrategy implements ContextStrategy {
         budget: maxTokens,
         actual: changeTokens + newestTokens,
         stage: 'Passthrough: its system changes and the newest conversation message',
-        clearedBy: changeTokens < maxTokens ? ['newer-message'] : [],
+        clearedBy: [],
         diagnostics: { headTokens: changeTokens, tailTokens: newestTokens, middleTokens: 0, middleChunkCount: 0, deepestLevel: 0 },
       });
     }

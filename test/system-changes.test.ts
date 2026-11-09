@@ -11,7 +11,8 @@
  * head window; the passthrough strategies keep it when their window starts
  * after it), refuses over budget when the changes alone don't fit (beyond
  * grace, where enforcement is on), or, under the passthrough strategies,
- * when the newest conversation message doesn't fit beside them,
+ * when their walk back from the newest message stops at one larger than
+ * the room they leave,
  * and leaves it out of what compression reads. A committing compile reports
  * `firstChanged`, where its messages first differ from the last committing
  * compile's.
@@ -1075,7 +1076,7 @@ describe('the passthrough strategies and a system change before their window', (
     ['passthrough', () => new PassthroughStrategy()],
     ['windowed-passthrough', () => new WindowedPassthroughStrategy()],
   ] as const) {
-    it(`${label}: refuses when the newest conversation message doesn't fit beside its changes, naming a newer one, which clears it, while they leave room for one`, async () => {
+    it(`${label}: refuses when the newest conversation message is larger than the room its changes leave, naming it, and one newer message that fits doesn't clear it`, async () => {
       const cm = await open(make());
       const c = cm.addMessage('Harness', [change()]);
       const big = cm.addMessage('User', [text('big ' + 'word '.repeat(400))]);
@@ -1084,7 +1085,7 @@ describe('the passthrough strategies and a system change before their window', (
       await assert.rejects(cm.compile({ maxTokens: C + 10 + 50, reserveForResponse: 50 }), (err: unknown) => {
         assert.ok(err instanceof OverBudgetError, String(err));
         assert.deepEqual(err.clearedBy, ['newer-message']);
-        assert.match(err.message, /its system changes and the newest conversation message/);
+        assert.match(err.message, new RegExp(`: message ${big} fits no window `));
         assert.deepEqual([err.budget, err.actual], [C + 10, C + U], 'the budget less the reserve, and the changes with the newest message');
         assert.deepEqual([err.diagnostics.headTokens, err.diagnostics.tailTokens], [C, U], 'the changes, then the newest message');
         return true;
@@ -1103,30 +1104,46 @@ describe('the passthrough strategies and a system change before their window', (
         assert.deepEqual([err.diagnostics.headTokens, err.diagnostics.tailTokens], [C + C2, U], 'the changes, then the newest conversation message');
         return true;
       });
-      // A newer conversation message that fits beside the changes clears it.
-      const small = cm.addMessage('User', [text('ok')]);
-      const compiled = await cm.compile({ maxTokens: C + C2 + estimateOf(cm, small), reserveForResponse: 0 });
-      assert.deepEqual(rawIds(compiled), [c, trailing, small]);
+      const newer = [cm.addMessage('User', [text('ok')])];
+      const room: TokenBudget = { maxTokens: C + C2 + 4 * estimateOf(cm, newer[0]!), reserveForResponse: 0 };
+      await assert.rejects(cm.compile(room), (err: unknown) => {
+        assert.ok(err instanceof OverBudgetError, String(err));
+        assert.match(err.message, new RegExp(`: message ${big} fits no window `), 'one newer message that fits beside the changes leaves it in reach');
+        return true;
+      });
+      for (let i = 0; i < 4; i++) newer.push(cm.addMessage('User', [text('ok')]));
+      const sent = rawIds(await cm.compile(room));
+      assert.ok(!sent.includes(big), `newer conversation that alone overflows the room moves the window past it: ${JSON.stringify(sent)}`);
+      assert.equal(sent.at(-1), newer.at(-1));
     });
   }
 
-  it('passthrough: without changes, a newest message over the budget still sends nothing, as on main', async () => {
+  it('without changes, a newest message larger than the budget is refused, naming it, and a budget with no room after the response reserve is refused as the budget\'s', async () => {
     const cm = await open(new PassthroughStrategy());
     cm.addMessage('User', [text('hello')]);
     const big = cm.addMessage('User', [text('big ' + 'word '.repeat(400))]);
-    const compiled = await cm.compile({ maxTokens: estimateOf(cm, big) - 1, reserveForResponse: 0 });
-    assert.equal(compiled.messages.length, 0);
-    // Nor does a response reserve larger than the budget make it refuse.
-    assert.equal((await cm.compile({ maxTokens: 10, reserveForResponse: 20 })).messages.length, 0);
-    // The windowed strategy refuses it, naming the newest message alone.
+    await assert.rejects(cm.compile({ maxTokens: estimateOf(cm, big) - 1, reserveForResponse: 0 }), (err: unknown) => {
+      assert.ok(err instanceof OverBudgetError, String(err));
+      assert.match(err.message, new RegExp(`^Passthrough: message ${big} fits no window `));
+      return true;
+    });
+    const noRoom = { maxTokens: 10, reserveForResponse: 20 };
+    const budgetRefusal = (stage: RegExp) => (err: unknown): boolean => {
+      assert.ok(err instanceof OverBudgetError, String(err));
+      assert.match(err.message, stage);
+      assert.deepEqual(err.clearedBy, []);
+      return true;
+    };
+    await assert.rejects(cm.compile(noRoom), budgetRefusal(/^Passthrough: the budget leaves no room after the response reserve /));
     const windowed = await open(new WindowedPassthroughStrategy());
     windowed.addMessage('User', [text('hello')]);
     const big2 = windowed.addMessage('User', [text('big ' + 'word '.repeat(400))]);
     await assert.rejects(windowed.compile({ maxTokens: estimateOf(windowed, big2) - 1, reserveForResponse: 0 }), (err: unknown) => {
       assert.ok(err instanceof OverBudgetError, String(err));
-      assert.match(err.message, /^Windowed passthrough: the newest message alone/);
+      assert.match(err.message, new RegExp(`^Windowed passthrough: message ${big2} fits no window `));
       return true;
     });
+    await assert.rejects(windowed.compile(noRoom), budgetRefusal(/^Windowed passthrough: the budget leaves no room after the response reserve /));
   });
 
   it('windowed-passthrough: renderAsNewest gives a change before the anchor as select sends it, ahead of the window', async () => {

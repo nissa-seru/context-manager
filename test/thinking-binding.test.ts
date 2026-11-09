@@ -22,6 +22,7 @@ import type {
   RawBodySource,
   ReadinessState,
   RequestIdentity,
+  StoredMessage,
   ThinkingBinding,
   ThinkingStrip,
   TokenBudget,
@@ -779,16 +780,18 @@ describe('thinking binding: compile', () => {
     await manager.close();
   });
 
-  it('a shorter or empty record doesn\u2019t make older messages look stored since', async () => {
+  it('a shorter record doesn\u2019t make older messages look stored since', async () => {
     cleanup();
     const manager = await open();
     const { a1, a2 } = seed(manager);
     await manager.compile(BIG, undefined, BIND_DROP);
-    const empty = await manager.compile({ maxTokens: 1, reserveForResponse: 0 }, undefined, BIND_DROP);
-    assert.equal(empty.messages.length, 0, 'setup: nothing fits');
+    const priceOfA2 = (manager as unknown as { messageStore: { estimateTokens(m: StoredMessage): number } })
+      .messageStore.estimateTokens(manager.getMessage(a2)!);
+    const shorter = await manager.compile({ maxTokens: priceOfA2, reserveForResponse: 0 }, undefined, BIND_DROP);
+    assert.deepEqual(thinkingByText(shorter), { A2: false }, 'setup: only the newest message fits, and it differs from the record');
     const back = await manager.compile(BIG, undefined, BIND_DROP);
     assert.deepEqual(thinkingByText(back), { U1: false, A1: false, U2: false, A2: false });
-    assert.deepEqual(back.thinkingStrip, { newly: [a1, a2], cause: 'messages' });
+    assert.deepEqual(back.thinkingStrip, { newly: [a1], cause: 'messages' });
     await manager.close();
   });
 
