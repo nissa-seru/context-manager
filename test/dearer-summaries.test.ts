@@ -361,6 +361,14 @@ describe('a summary weighed against its messages sent raw, on the hierarchical s
     { shape: 'a call no result answers', swaps: true,
       write: (manager) => [manager.addMessage('user', text('ask ' + words(8))), manager.addMessage('agent', call('call-none'))],
       seed: (f, ids) => f.strategy.seed('L1-cycle', 1, ids, ids[0]!, ids[1]!) },
+    { shape: 'two calls sharing an id in one message, then a result', swaps: false,
+      write: (manager) => [
+        manager.addMessage('user', text('ask ' + words(8))),
+        manager.addMessage('agent', [...call('call-twice'), { type: 'tool_use', id: 'call-twice', name: 'lookup', input: { q: 'again' } }] as ContentBlock[]),
+        manager.addMessage('user', result('call-twice')),
+        manager.addMessage('agent', text('so ' + words(8))),
+      ],
+      seed: (f, ids) => f.strategy.seed('L1-cycle', 1, ids, ids[0]!, ids[3]!) },
   ];
   for (const { shape, swaps, write, seed } of shapes) {
     it(`${swaps ? 'sends as its messages' : 'keeps'} a summary that costs more than its messages where they hold ${shape}, and the request keeps every tool block of a message it sends raw`, async () => {
