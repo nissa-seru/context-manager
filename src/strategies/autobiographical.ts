@@ -719,6 +719,73 @@ function answeredToolCalls(messages: readonly StoredMessage[]): Map<string, Answ
   return byTool;
 }
 
+/** A view's tool blocks in send order: the message each sits in, its partner
+ *  by answeredCallIndexes, how many results answer each call, and the
+ *  messages of each call and its result in a later message. */
+type ToolRounds = {
+  blocks: ContentBlock[];
+  messageOf: number[];
+  blocksOf: Map<number, number[]>;
+  partnerOf: Map<number, number>;
+  results: Map<number, number>;
+  spans: Array<[number, number]>;
+};
+
+function toolRoundsOf(messages: readonly StoredMessage[]): ToolRounds {
+  const blocks: ContentBlock[] = [];
+  const messageOf: number[] = [];
+  messages.forEach((m, position) => m.content.forEach((block) => {
+    blocks.push(block);
+    messageOf.push(position);
+  }));
+  const blocksOf = new Map<number, number[]>();
+  blocks.forEach((block, i) => {
+    if (block.type !== 'tool_use' && block.type !== 'tool_result') return;
+    const list = blocksOf.get(messageOf[i]!) ?? [];
+    list.push(i);
+    blocksOf.set(messageOf[i]!, list);
+  });
+  const partnerOf = new Map<number, number>();
+  const results = new Map<number, number>();
+  const spans: Array<[number, number]> = [];
+  answeredCallIndexes(blocks).forEach((callAt, at) => {
+    if (callAt === undefined) return;
+    partnerOf.set(at, callAt);
+    partnerOf.set(callAt, at);
+    results.set(callAt, (results.get(callAt) ?? 0) + 1);
+    if (messageOf[callAt]! < messageOf[at]!) spans.push([messageOf[callAt]!, messageOf[at]!]);
+  });
+  return { blocks, messageOf, blocksOf, partnerOf, results, spans };
+}
+
+/** Whether sending the messages at `positions` raw keeps every tool round
+ *  whole, as pairing repair keeps a raw tool block only beside its partner,
+ *  answered once: (i) each result, and each call a result answers, is
+ *  answered once, its partner in its own message or the one beside it, which
+ *  goes raw too (a call no result answers passes: repair gives it a stub);
+ *  (ii) none of them lies between a call and its result that both go raw and
+ *  that it holds neither of. */
+function keepsToolRoundsWhole(rounds: ToolRounds, positions: readonly number[], goesRaw: (position: number) => boolean): boolean {
+  const sent = new Set(positions);
+  for (const p of sent) {
+    for (const i of rounds.blocksOf.get(p) ?? []) {
+      const partner = rounds.partnerOf.get(i);
+      if (partner === undefined) {
+        if (rounds.blocks[i]!.type === 'tool_use') continue;
+        return false;
+      }
+      if (rounds.results.get(rounds.blocks[i]!.type === 'tool_use' ? i : partner) !== 1) return false;
+      const q = rounds.messageOf[partner]!;
+      if (Math.abs(p - q) > 1 || !goesRaw(q)) return false;
+    }
+  }
+  for (const [call, result] of rounds.spans) {
+    if (sent.has(call) || sent.has(result) || !goesRaw(call) || !goesRaw(result)) continue;
+    for (const p of sent) if (p > call && p < result) return false;
+  }
+  return true;
+}
+
 /** Whether two messages' replacements (each result's place and marker) are
  *  the same; two absent ones are. */
 function sameMarkers(a: ReadonlyMap<number, string> | undefined, b: ReadonlyMap<number, string> | undefined): boolean {
@@ -18833,6 +18900,42 @@ export class AutobiographicalStrategy implements ResettableStrategy {
         } else {
           middleRaw.push({ msg: m, position: i });
           rawPlanned.add(m.id);
+        }
+      }
+      // A summary goes out only where it costs fewer tokens than its messages
+      // sent raw, each priced as emission charges it; otherwise, a tie
+      // included, they go raw in its place, unless that would part a tool
+      // round (#407). Under a maxMessageTokens cap the combined answer is
+      // charged as the cap leaves it, not at each summary's cost, so there
+      // the summaries stay as selected.
+      if (this.config.positionedRecallPairs !== false || !msgCap) {
+        const positioned = this.config.positionedRecallPairs !== false;
+        let rounds: ToolRounds | undefined;
+        for (const s of [...selectedSummaries]) {
+          if (!s.content || !s.content.trim()) continue;
+          const charge = positioned ? this.recallPairCost(s, this.buildRecallHeader(s)) : this.recallAnswerCost(s).cost;
+          const leaves: { msg: StoredMessage; position: number }[] = [];
+          let raw = 0;
+          let inView = true;
+          for (const id of leavesOf(s)) {
+            if (rawPlanned.has(id)) continue;
+            const position = positionOf.get(id);
+            // A removal in legacy mode keeps the summary that folded the row, which alone holds it now.
+            if (position === undefined) { inView = false; break; }
+            const msg = messages[position]!;
+            raw += store.estimateTokens(this.prunedForSend(store, msg)) + this.cappedForSend(store, msg, msgCap).extra;
+            if (raw > charge) break;
+            leaves.push({ msg, position });
+          }
+          if (!inView || raw > charge) continue;
+          rounds ??= toolRoundsOf(messages);
+          const sending = new Set(leaves.map((leaf) => leaf.position));
+          if (!keepsToolRoundsWhole(rounds, [...sending], (p) => sending.has(p) || rawPlanned.has(messages[p]!.id))) continue;
+          selectedSummaries.splice(selectedSummaries.indexOf(s), 1);
+          for (const leaf of leaves) {
+            middleRaw.push(leaf);
+            rawPlanned.add(leaf.msg.id);
+          }
         }
       }
     }
