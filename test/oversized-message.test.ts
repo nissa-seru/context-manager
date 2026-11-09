@@ -141,6 +141,25 @@ for (const [label, make, windowed] of [
   });
 }
 
+describe('windowed-passthrough: a message larger than the room, past the re-anchor share', () => {
+  it('is left out with the history before it once newer conversation passes the share, though that fits the room', async () => {
+    const cm = await open(new WindowedPassthroughStrategy({ reAnchorFraction: 0.5 }));
+    const older = history(cm);
+    const big = paste(cm);
+    const newer: string[] = [];
+    let total = 0;
+    while (total <= BUDGET.maxTokens * 0.5) {
+      newer.push(cm.addMessage('User', text(`newer ${newer.length} ${'word '.repeat(20)}`)));
+      total += estimateOf(cm, newer.at(-1)!);
+    }
+    assert.ok(total <= BUDGET.maxTokens, `setup: the newer conversation fits the room (${total})`);
+    const sent = rawIds(await cm.compile(BUDGET));
+    assert.ok(![big, ...older].some((id) => sent.includes(id)), `the paste and the older history are left out: ${JSON.stringify(sent)}`);
+    assert.equal(sent.at(-1), newer.at(-1));
+    await cm.close();
+  });
+});
+
 describe('windowed-passthrough: a message larger than the room, under maxMessageTokens', () => {
   it('is cut with its marker and sent with the history around it', async () => {
     const cm = await open(new WindowedPassthroughStrategy({ maxMessageTokens: 100 }));

@@ -30,9 +30,9 @@
  * strategy refuses with OverBudgetError, its clearedBy empty, since
  * no newer message or compression shrinks them; a dry compile reports where
  * the strategy's other refusals do (the passthrough strategies refuse none
- * on a dry compile). While they fit, the passthrough strategies refuse when
- * the newest conversation message doesn't fit beside them (OverBudgetError,
- * naming a newer message while they leave room for one)
+ * on a dry compile). While they leave room, the passthrough strategies
+ * refuse when their walk back from the newest message stops at a message
+ * larger than that room (OverBudgetError, its clearedBy 'newer-message'),
  * and otherwise drop the oldest messages as they do without changes, and
  * the autobiographical strategy refuses a loss as it refuses any: the
  * hierarchical path's recent window refuses an eviction with
