@@ -4403,6 +4403,10 @@ export class AutobiographicalStrategy implements ResettableStrategy {
     return { kept, keptTokens: total };
   }
 
+  private compressionCacheTtlField(): Pick<NormalizedRequest, 'cacheTtl'> {
+    return this.config.compressionCacheMarkers === false ? {} : { cacheTtl: this.config.compressionCacheTtl };
+  }
+
   /**
    * Issue #37: tag a mint request's stability strata with cache breakpoints.
    *
@@ -4431,15 +4435,17 @@ export class AutobiographicalStrategy implements ResettableStrategy {
    * shifts the pairs on every subsequent mint, and cache writes on a shifting
    * prefix are pure waste (measured up to +42% total cost at 1h TTL). The
    * head boundary sits before the ladder, so eviction cannot move it; with
-   * no head window a capped request carries no marker at all.
+   * no head window a capped request carries no marker of its own.
    * Effective ladder reuse also requires the append-stable source order
    * fix (2026-08-19); on stores minted under the older lexical order the
    * markers are merely harmless.
    *
-   * Returns true iff at least one breakpoint was placed — callers attach
-   * `cacheTtl` only then, so every marker-less request (kill switch, capped
-   * ladder with no head window, no ladder yet) keeps the exact pre-seam request shape and its
-   * canonical hash / quarantine identity.
+   * Returns true iff at least one breakpoint was placed. Every compression
+   * and merge request carries `compressionCacheTtl` either way: where no
+   * message carries a marker, membrane marks the system prompt, and that
+   * marker takes the request's `cacheTtl`. Only the kill switch
+   * (`compressionCacheMarkers: false`) sends the pre-seam request, with its
+   * canonical hash and quarantine identity.
    */
   protected applyMintCacheSeams(
     messages: NormalizedRequest['messages'],
@@ -11575,7 +11581,7 @@ export class AutobiographicalStrategy implements ResettableStrategy {
     const mintMessages = cleaned
       .map(m => ({ participant: m.participant, content: stripEmptyTextBlocks(m.content) }))
       .filter(m => m.content.length > 0);
-    const mintSeamed = this.applyMintCacheSeams(
+    this.applyMintCacheSeams(
       mintMessages,
       keptSummaries,
       keptSummaries.length < priorSummaries.length,
@@ -11600,11 +11606,10 @@ export class AutobiographicalStrategy implements ResettableStrategy {
       // blanket strip would also remove the recall-pair reasoning carriers,
       // which must reach the API verbatim (see the recall-pair sites).
       messages: mintMessages,
-      // 1h TTL on the seam markers: steady-state mint cadence exceeds the
-      // 5-minute cache window, where markers cost more than they save. Only
-      // attached when a seam was actually placed — a marker-less request
-      // must keep its pre-seam shape (canonical hash, quarantine identity).
-      ...(mintSeamed ? { cacheTtl: this.config.compressionCacheTtl } : {}),
+      // membrane marks the system prompt where no message carries a marker,
+      // and that marker takes this TTL too, so the request carries it with or
+      // without a seam.
+      ...this.compressionCacheTtlField(),
       config: {
         model: this.requireCompressionModel(),
         maxTokens: outputReserveTokens, // generous, never truncating (above)
@@ -11633,15 +11638,16 @@ export class AutobiographicalStrategy implements ResettableStrategy {
       const sourceOnlyFallbackWireMessages = sourceOnlyCleaned
         .map(m => ({ participant: m.participant, content: stripEmptyTextBlocks(m.content) }))
         .filter(m => m.content.length > 0);
-      // Keep the final rung wire-identical to legacy direct source-only. With
-      // an empty recall ladder this places no owned seam/TTL, but when cache
-      // markers are enabled it still strips stale imported block-level
-      // cache_control before dispatch. The kill switch preserves passthrough.
+      // Keep the final rung wire-identical to direct source-only. With an
+      // empty recall ladder this places no seam, but when cache markers are
+      // enabled it still strips stale imported block-level cache_control
+      // before dispatch. The kill switch preserves passthrough.
       this.applyMintCacheSeams(sourceOnlyFallbackWireMessages, [], false);
       sourceOnlyFallbackRequest = {
         ...(ctx.systemPrompt ? { system: ctx.systemPrompt } : {}),
         shedOversizeImages: true,
         messages: sourceOnlyFallbackWireMessages,
+        ...this.compressionCacheTtlField(),
         config: structuredClone(request.config),
         tools: ctx.tools,
       };
@@ -14313,7 +14319,7 @@ export class AutobiographicalStrategy implements ResettableStrategy {
     const mintMessages = cleaned
       .map(m => ({ participant: m.participant, content: stripEmptyTextBlocks(m.content) }))
       .filter(m => m.content.length > 0);
-    const mintSeamed = this.applyMintCacheSeams(
+    this.applyMintCacheSeams(
       mintMessages,
       keptPriorSummaries,
       keptPriorSummaries.length < priorSummariesAll.length,
@@ -14348,11 +14354,10 @@ export class AutobiographicalStrategy implements ResettableStrategy {
       // blanket strip would also remove the recall-pair reasoning carriers,
       // which must reach the API verbatim (see the recall-pair sites).
       messages: mintMessages,
-      // 1h TTL on the seam markers: steady-state mint cadence exceeds the
-      // 5-minute cache window, where markers cost more than they save. Only
-      // attached when a seam was actually placed — a marker-less request
-      // must keep its pre-seam shape (canonical hash, quarantine identity).
-      ...(mintSeamed ? { cacheTtl: this.config.compressionCacheTtl } : {}),
+      // membrane marks the system prompt where no message carries a marker,
+      // and that marker takes this TTL too, so the request carries it with or
+      // without a seam.
+      ...this.compressionCacheTtlField(),
       config: {
         model: this.requireCompressionModel(),
         // Generous output ceiling so a memory-write is never truncated mid-thought:

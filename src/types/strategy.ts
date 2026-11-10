@@ -2387,7 +2387,9 @@ export interface AutobiographicalConfig {
    * ladder was budget-capped (`compressionRecallBudgetTokens`): front
    * eviction shifts the prefix every mint, and measured cache writes there
    * are pure waste (up to +42% cost). Requires append-stable ladder order
-   * (the 2026-08-19 source-order fix) to be effective.
+   * (the 2026-08-19 source-order fix) to be effective. False sends every
+   * compression and merge request without these markers and without
+   * `cacheTtl`.
    *
    * Default: true.
    */
@@ -2398,7 +2400,10 @@ export interface AutobiographicalConfig {
    * minutes-to-hours in steady state — beyond the 5-minute TTL, where
    * markers cost more than they save — so the lane defaults to '1h'
    * (write premium 2x vs 1.25x, break-even reuse probability 0.53 vs 0.22).
-   * Back-to-back drains work under either.
+   * Back-to-back drains work under either. Every compression and merge
+   * request carries it, so it's also the TTL of the system marker membrane
+   * places on a request with none of these breakpoints, such as one with no
+   * recall ladder.
    *
    * Default: '1h'.
    */
