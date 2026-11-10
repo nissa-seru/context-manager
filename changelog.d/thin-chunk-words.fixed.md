@@ -17,3 +17,11 @@
   stays as it is, and so does what was already written from one: a later
   chunk's L1 that recalled it, or an L3 merge, which reads L1s. An
   audit-only open rewrites nothing.
+- `AutobiographicalConfig.minChunkCharsForLLM`'s doc changes with it. Old:
+  "below which L1 compression skips the LLM call and stores a mechanical stub
+  summary instead (default: 200)." New: "below which L1 compression skips the
+  LLM call and stores the chunk's own words as its summary instead, one
+  `participant: text` line per message with text (the name left off where the
+  text begins with it already), or, where none has text, a line saying how
+  many messages it holds and that none has text (default: 200)." The option's
+  name, type and default stay, and so do the chunks it picks.
