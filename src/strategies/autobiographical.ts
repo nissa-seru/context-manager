@@ -758,6 +758,30 @@ function formatInstruction(targetTokens: number): string {
   );
 }
 
+const OLD_QUIET_STRETCH_STUB =
+  /^\(A quiet stretch: \d+ messages of routine system traffic — heartbeats, empty turns, notices\. Nothing happened worth remembering\.\)$/;
+
+function beginsWithSpeaker(participant: string, text: string): boolean {
+  if (!text.startsWith(participant) || text.charAt(participant.length) !== ':') return false;
+  const after = text.charAt(participant.length + 1);
+  return after === '' || after === ' ' || after === '\n';
+}
+
+function thinChunkWords(messages: readonly StoredMessage[]): string {
+  const lines: string[] = [];
+  for (const message of messages) {
+    const text = message.content
+      .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n')
+      .trim();
+    if (text === '') continue;
+    lines.push(beginsWithSpeaker(message.participant, text) ? text : `${message.participant}: ${text}`);
+  }
+  if (lines.length > 0) return lines.join('\n');
+  return `(${messages.length} ${messages.length === 1 ? 'message' : 'messages'}, none with text.)`;
+}
+
 /**
  * Witnessed-record instruction for chunks pinned as inherited history
  * (`witnessedBeforeSequence`). The slice predates the agent's own first
@@ -3200,6 +3224,8 @@ export class AutobiographicalStrategy implements ResettableStrategy {
       if (abortIfStale()) return;
       this.migrateChunkRecords(ctx.messageStore);
       if (abortIfStale()) return;
+      this.rewriteQuietStretchStubs(ctx.messageStore);
+      if (abortIfStale()) return;
       this.rebuildChunks(ctx.messageStore);
       if (abortIfStale()) return;
       this.releaseRowsThatLeft(ctx);
@@ -3428,6 +3454,24 @@ export class AutobiographicalStrategy implements ResettableStrategy {
       `${this.chunkRecords.length} records (${skippedStale} stale generations, ` +
       `${skippedGhost} fully-orphaned L1s skipped)`,
     );
+  }
+
+  protected rewriteQuietStretchStubs(store: MessageStoreView): void {
+    if (!this.store || this.config.auditOnly) return;
+    let rewritten = 0;
+    const summaries = this.summaries.map((summary) => {
+      if (!OLD_QUIET_STRETCH_STUB.test(summary.content)) return summary;
+      const messages = summary.sourceIds.map((id) => store.get(id));
+      if (messages.some((message) => !message)) return summary;
+      const words = thinChunkWords(messages as StoredMessage[]);
+      rewritten++;
+      return { ...summary, content: words, tokens: this.estimateTokens([{ type: 'text', text: words }]) };
+    });
+    if (rewritten === 0) return;
+    this.requireBranchMutation('rewriteQuietStretchStubs');
+    this.summaries = summaries;
+    this.writeHeldState(this.summariesStateId, () => this.store?.setStateJson(this.summariesStateId, this.summaries));
+    this.diag.warn(`[autobiographical] rewrote ${rewritten} quiet-stretch stub(s) as the words of the messages they cover`);
   }
 
   /** Append a record to the chunks slot + in-memory mirror. */
@@ -11053,21 +11097,19 @@ export class AutobiographicalStrategy implements ResettableStrategy {
     // summarizer nothing to remember. Asked anyway, it confabulates: it
     // reaches for the nearest salient content (head window, prior recall
     // pairs) and narrates it as if it just happened — each such L1 then
-    // compounds through merges (the "68 initiations" incident). Store a
-    // mechanical stub without an LLM call instead. Chunks with any
+    // compounds through merges (the "68 initiations" incident). Store the
+    // chunk's own words without an LLM call instead. Chunks with any
     // non-text blocks (tool cycles, images) are never stubbed.
     const minChunkChars = this.config.minChunkCharsForLLM ?? 200;
     const substantiveChars = this.thinChunkChars(chunk);
     if (substantiveChars !== undefined) {
       const messageIds = chunk.messages.map(m => m.id);
+      const words = thinChunkWords(chunk.messages);
       const stub: SummaryEntry = {
         id: `L1-${this.nextSummaryIdCounter()}`,
         level: 1,
-        content:
-          `(A quiet stretch: ${chunk.messages.length} messages of routine ` +
-          `system traffic — heartbeats, empty turns, notices. Nothing ` +
-          `happened worth remembering.)`,
-        tokens: 40,
+        content: words,
+        tokens: this.estimateTokens([{ type: 'text', text: words }]),
         sourceLevel: 0,
         sourceIds: messageIds,
         sourceRange: { first: messageIds[0], last: messageIds[messageIds.length - 1] },

@@ -395,7 +395,8 @@ describe('AutobiographicalStrategy — persistence', () => {
       for (let i = 0; i < 100 && !manager.isReady(); i++) await manager.tick();
       assert.ok(manager.isReady(), 'the queues drained');
       const summaries = strategy.getSummariesView();
-      assert.ok(summaries.some((s) => s.level === 1 && s.content.startsWith('(A quiet stretch')), 'the stub');
+      const words = ['User', 'Claude', 'User', 'Claude'].map((p) => `${p}: ${'word '.repeat(8).trim()}`).join('\n');
+      assert.ok(summaries.some((s) => s.level === 1 && s.content === words), 'the stub');
       assert.ok(summaries.some((s) => s.level === 1 && s.content === 'memory body'), 'an L1 compression');
       assert.ok(summaries.some((s) => s.level === 2 && s.content === 'memory body'), 'a merge');
       assert.deepEqual(warnings.filter((w) => w.includes('storing summary')), [], 'no write repaired a range');

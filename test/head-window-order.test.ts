@@ -202,8 +202,8 @@ describe('Compression prompt ordering (confabulation regression)', () => {
         'asking a summarizer to memorize nothing produces confabulation',
     );
 
-    const stubs = strategy.searchSummaries({ text: 'quiet stretch' });
-    assert.ok(stubs.length > 0, 'stub summaries must carry non-empty "quiet stretch" content');
+    const stubs = strategy.searchSummaries({ text: 'user: hb' });
+    assert.ok(stubs.length > 0, "stub summaries must carry the chunk's own words");
     for (const s of stubs) {
       assert.ok(s.summary.content.trim().length > 0, 'stub content must be non-empty (400 guard)');
     }

@@ -964,7 +964,7 @@ describe('KnowledgeStrategy defaults and options', () => {
       }
       await manager.compile();
       await settle(manager);
-      const stubs = manager.getSummariesInRange({ level: 1 }).filter((s) => s.content.startsWith('(A quiet stretch'));
+      const stubs = manager.getSummariesInRange({ level: 1 }).filter((s) => s.content === 'Claude: ok\nUser: .');
       assert.equal(stubs.length, 1, 'premise: the two near-empty messages became one stub summary');
       assert.equal(manager.getSummary(stubs[0]!.id)?.phaseType, 'synthesis');
     } finally {

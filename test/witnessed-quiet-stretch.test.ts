@@ -116,7 +116,7 @@ async function run(
   return { calls, summaries, byId: new Map(summaries.map((s) => [s.id, s])), seqOf };
 }
 
-const isStub = (s: SummaryEntry) => s.content.startsWith('(A quiet stretch');
+const isStub = (s: SummaryEntry) => s.level === 1 && !/^\[[a-z0-9-]+\] /.test(s.content);
 const leafSequences = (r: Run, s: SummaryEntry) => s.sourceIds.map((id) => r.seqOf.get(id)!);
 const sourcesOf = (r: Run, s: SummaryEntry) => s.sourceIds.map((id) => r.byId.get(id)!);
 const writtenFrom = (s: SummaryEntry): Instruction => (s.content.match(/^\[([a-z0-9-]+)\]/)?.[1] as Instruction) ?? 'unknown';

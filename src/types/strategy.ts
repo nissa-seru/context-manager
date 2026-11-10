@@ -2538,8 +2538,11 @@ export interface AutobiographicalConfig {
 
   /**
    * Minimum substantive text (non-whitespace chars across a chunk's
-   * messages) below which L1 compression skips the LLM call and stores a
-   * mechanical stub summary instead (default: 200).
+   * messages) below which L1 compression skips the LLM call and stores the
+   * chunk's own words as its summary instead, one `participant: text` line
+   * per message with text (the name left off where the text begins with it
+   * already), or, where none has text, a line saying how many
+   * messages it holds and that none has text (default: 200).
    *
    * A chunk of silent/skip turns and bare system traffic gives the
    * summarizer nothing to remember; asked anyway, it confabulates —
