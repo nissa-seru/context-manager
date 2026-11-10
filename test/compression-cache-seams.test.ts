@@ -138,13 +138,12 @@ describe('Compression requests: cache seams (issue #37)', () => {
     }
   });
 
-  it('the first mint (no prior ladder) carries no markers and no cacheTtl', async () => {
+  it('the first mint (no prior ladder) carries no markers, and the lane\'s cacheTtl', async () => {
     const calls = await runWorkload({}, 40);
     const first = calls[0].request;
     assert.strictEqual(recallHeaderIndices(first).length, 0, 'first mint should have no recall pairs');
     assert.strictEqual(breakpointIndices(first).length, 0, 'no ladder → nothing to mark');
-    assert.ok(!Object.prototype.hasOwnProperty.call(first, 'cacheTtl'),
-      'marker-less request must keep the pre-seam shape (no cacheTtl key)');
+    assert.strictEqual(first.cacheTtl, '1h', 'the system marker membrane places lasts as long as the seams do');
   });
 
   it('merge requests mark only prior-ladder pairs, never expanded sources', async () => {
@@ -157,6 +156,7 @@ describe('Compression requests: cache seams (issue #37)', () => {
     const firstMerge = merges[0].request;
     assert.strictEqual(breakpointIndices(firstMerge).length, 0,
       'empty prior ladder → no markers');
+    assert.strictEqual(firstMerge.cacheTtl, '1h', 'a merge with no prior ladder carries the lane\'s cacheTtl');
     // Later merges with consolidated priors mark the prior frontier: every
     // marker must sit on some recall-pair answer.
     const marked = merges.filter((m) => breakpointIndices(m.request).length > 0);
@@ -200,8 +200,8 @@ describe('Compression requests: cache seams (issue #37)', () => {
     for (const { request } of late) {
       assert.strictEqual(breakpointIndices(request).length, 0,
         'capped ladder → markers suppressed (front-eviction shifts the prefix)');
-      assert.ok(!Object.prototype.hasOwnProperty.call(request, 'cacheTtl'),
-        'capped (marker-less) request must not carry cacheTtl');
+      assert.strictEqual(request.cacheTtl, '1h',
+        'tools and system don\'t shift, so the system marker membrane places carries the lane\'s cacheTtl');
     }
     assert.ok(capped.length > 0, 'expected at least one laddered call in the capped run');
   });
@@ -222,6 +222,54 @@ describe('Compression requests: cache seams (issue #37)', () => {
     const [a, b] = late.slice(-2).map(({ request }) =>
       JSON.stringify(request.messages.slice(0, recallHeaderIndices(request)[0]).map((m) => [m.participant, m.content])));
     assert.ok(late.length < 2 || a === b, 'head prefix must not move between capped mints');
+  });
+
+  it('source-only L1 requests carry no markers, and the lane\'s cacheTtl', async () => {
+    const calls = await runWorkload({ compressionSourceOnly: true }, 40);
+    const mints = calls.filter((c) => !isMerge(c.request));
+    assert.ok(mints.length >= 3, `expected source-only mints, got ${mints.length}`);
+    for (const { request } of mints) {
+      assert.strictEqual(recallHeaderIndices(request).length, 0, 'a source-only request holds no recall pairs');
+      assert.strictEqual(breakpointIndices(request).length, 0, 'no ladder → nothing to mark');
+      assert.strictEqual(request.cacheTtl, '1h');
+    }
+  });
+
+  it('a ladder-less request carries compressionCacheTtl as configured', async () => {
+    const calls = await runWorkload({ compressionSourceOnly: true, compressionCacheTtl: '5m', mergeThreshold: 2 }, 60);
+    assert.ok(calls.some((c) => isMerge(c.request)), 'expected a merge');
+    for (const { request } of calls.filter((c) => breakpointIndices(c.request).length === 0)) {
+      assert.strictEqual(request.cacheTtl, '5m');
+    }
+  });
+
+  it('the source-only fallback request carries the lane\'s cacheTtl', async () => {
+    cleanup();
+    const calls: CapturedCall[] = [];
+    const refusal = {
+      content: [], stopReason: 'refusal', usage: { inputTokens: 100, outputTokens: 0 },
+      raw: { response: { stop_details: { category: 'reasoning_extraction' } } },
+    };
+    const ok = {
+      stopReason: 'end_turn',
+      content: [{ type: 'text', text: 'A stretch of routine traffic worth remembering in some detail: ' + 'word '.repeat(40) }],
+      usage: { input_tokens: 1000, output_tokens: 50 },
+    };
+    const membrane = { complete: async (request: NormalizedRequest) => { calls.push({ request }); return calls.length === 1 ? refusal : ok; } };
+    const strategy = new AutobiographicalStrategy({
+      compressionModel: TEST_COMPRESSION_MODEL, targetChunkTokens: 80, headWindowTokens: 0, recentWindowTokens: 0,
+      hierarchical: true, compressionSourceOnlyFallback: true, compressionRefusalCurveFallbacks: 0,
+    } as ConstructorParameters<typeof AutobiographicalStrategy>[0]);
+    const manager = await ContextManager.open({ path: TEST_STORE_PATH, strategy, membrane: membrane as any });
+    for (let i = 0; i < 12; i++) {
+      manager.addMessage(i % 2 === 0 ? 'user' : 'agent', [t(`turn ${i} of steady substantive traffic about the ongoing work `.repeat(3))]);
+      await drain(manager);
+    }
+    await manager.close();
+    assert.ok(calls.length >= 2, `expected the refused call and its fallback, got ${calls.length}`);
+    const fallback = calls[1]!.request;
+    assert.strictEqual(recallHeaderIndices(fallback).length, 0, 'the fallback is source-only');
+    assert.strictEqual(fallback.cacheTtl, '1h');
   });
 
   it('compressionCacheMarkers: false restores the complete pre-seam request shape', async () => {
